@@ -21,7 +21,9 @@ jobs:
   build-debug-apk:
     name: Build debug APK
     runs-on: ubuntu-24.04
-    timeout-minutes: 30
+    timeout-minutes: 60
+    env:
+      CSQTT_STRICT_TOOLCHAIN: "1"
 
     steps:
       - name: Check out source
@@ -54,8 +56,43 @@ jobs:
           "$sdkmanager" "platforms;android-35" "build-tools;35.0.0" "ndk;27.2.12479018"
           echo "ANDROID_NDK_HOME=$ANDROID_HOME/ndk/27.2.12479018" >> "$GITHUB_ENV"
 
-      - name: Build debug APK
-        run: ./gradlew :app:assembleDebug -PtargetAbis=arm64-v8a --no-daemon
+      - name: Install CSQTT build dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends cmake ninja-build jq perl
+
+      - name: Set up Rust
+        uses: dtolnay/rust-toolchain@master
+        with:
+          toolchain: "1.97.1"
+          targets: aarch64-linux-android,armv7-linux-androideabi,x86_64-linux-android
+
+      - name: Fetch pinned CSQTT source
+        run: bash scripts/build-csqtt-engine.sh --fetch-only
+
+      - name: Cache Rust
+        uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: "build/csqtt-engine/src/rust-client -> ../../target"
+          shared-key: csqtt-engine-debug
+
+      - name: Install cargo-ndk
+        run: cargo install cargo-ndk --version 4.1.2 --locked
+
+      - name: Build debug APK with CSQTT engine
+        run: ./gradlew :app:assembleDebug -PcsqttEngine=true -PtargetAbis=arm64-v8a --no-daemon
+
+      - name: Verify CSQTT engine and license
+        env:
+          CSQTT_TARGET_ABIS: arm64-v8a
+          CSQTT_REQUIRE_16K_PAGES: "1"
+        run: |
+          bash scripts/verify-csqtt-engine.sh
+          bash scripts/verify-license.sh app/build/outputs/apk/debug/app-arm64-v8a-debug.apk
+          apk=app/build/outputs/apk/debug/app-arm64-v8a-debug.apk
+          unzip -l "$apk" | grep -q 'lib/arm64-v8a/libcsqtt.so'
+          unzip -l "$apk" | grep -q 'assets/csqtt-engine.json'
+          unzip -l "$apk" | grep -q 'assets/licenses/CSQTT-LICENSE'
 
       - name: Upload debug APK
         uses: actions/upload-artifact@v4

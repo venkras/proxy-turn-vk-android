@@ -1,0 +1,23 @@
+{
+  "version": "2.5.0",
+  "tag": "v2.5.0",
+  "commit": "fd936ef087c34cc46f26111dc2361f43b8b03c07",
+  "sourceUrl": "https://github.com/amurcanov/csqtt.git",
+  "sourceArchive": "https://codeload.github.com/amurcanov/csqtt/tar.gz/refs/tags/v2.5.0",
+  "sourceArchiveSha256": "a10615f39edae397b19332b4f9ec10d3c1c9ba7ed353a9c1dc70c1a1fe2da278",
+  "license": "PolyForm-Noncommercial-1.0.0",
+  "licenseFile": "app/src/main/assets/licenses/CSQTT-LICENSE",
+  "rust": "1.97.1",
+  "cargoNdk": "4.1.2",
+  "ndk": "27.2.12479018",
+  "api": 26,
+  "abis": [
+    "arm64-v8a",
+    "armeabi-v7a",
+    "x86_64"
+  ],
+  "cargoPackage": "csqtt-client",
+  "cargoBinary": "client",
+  "binaryName": "libcsqtt.so",
+  "maxSizeBytes": 12582912
+}

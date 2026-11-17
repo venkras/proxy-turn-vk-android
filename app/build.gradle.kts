@@ -6,15 +6,19 @@ plugins {
     id("org.jetbrains.kotlin.plugin.compose")
 }
 
-android {
-    val targetAbis = providers.gradleProperty("targetAbis")
-        .orNull
-        ?.split(',')
-        ?.map { it.trim() }
-        ?.filter { it.isNotEmpty() }
-        ?.ifEmpty { null }
-        ?: listOf("arm64-v8a", "armeabi-v7a", "x86_64")
+val csqttEngineEnabled = providers.gradleProperty("csqttEngine")
+    .map { it.toBoolean() }
+    .orElse(false)
 
+val targetAbis = providers.gradleProperty("targetAbis")
+    .orNull
+    ?.split(',')
+    ?.map { it.trim() }
+    ?.filter { it.isNotEmpty() }
+    ?.ifEmpty { null }
+    ?: listOf("arm64-v8a", "armeabi-v7a", "x86_64")
+
+android {
     namespace = "com.wdtt.client"   
     compileSdk = 35
     
@@ -101,6 +105,13 @@ android {
     packaging {
         jniLibs {
             useLegacyPackaging = true
+            if (csqttEngineEnabled.get()) {
+                keepDebugSymbols += "**/libcsqtt.so"
+            } else {
+                // A stale engine binary from a previous -PcsqttEngine=true
+                // build must never leak into a default APK.
+                excludes += "**/libcsqtt.so"
+            }
         }
         resources {
             excludes += "/META-INF/{AL2.0,LGPL2.1}"
@@ -160,9 +171,30 @@ tasks.register<Exec>("buildServerAsset") {
     )
 }
 
+tasks.register<Exec>("buildCsqttEngine") {
+    group = "build"
+    description = "Build the pinned CSQTT Rust engine into app/src/main/jniLibs"
+    workingDir = rootDir
+    commandLine("bash", rootDir.resolve("scripts/build-csqtt-engine.sh").absolutePath)
+    environment("CSQTT_TARGET_ABIS", targetAbis.joinToString(","))
+}
+
+tasks.register<Delete>("cleanStaleCsqttEngine") {
+    description = "Remove CSQTT artifacts left by an earlier -PcsqttEngine=true build"
+    delete(rootDir.resolve("app/src/main/assets/csqtt-engine.json"))
+    listOf("arm64-v8a", "armeabi-v7a", "x86_64").forEach { abi ->
+        delete(rootDir.resolve("app/src/main/jniLibs/$abi/libcsqtt.so"))
+    }
+}
+
 tasks.named("preBuild").configure {
     dependsOn("buildNativeLibs")
     dependsOn("buildServerAsset")
+    if (csqttEngineEnabled.get()) {
+        dependsOn("buildCsqttEngine")
+    } else {
+        dependsOn("cleanStaleCsqttEngine")
+    }
 }
 
 dependencies {

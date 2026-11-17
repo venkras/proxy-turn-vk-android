@@ -22,6 +22,11 @@ go.sum
 jniLibs/
 app/src/main/jniLibs/
 
+# ===== CSQTT engine (built from pinned upstream tag) =====
+build/csqtt-engine/
+app/src/main/jniLibs/*/libcsqtt.so
+app/src/main/assets/csqtt-engine.json
+
 # ===== Server binary =====
 app/src/main/assets/server
 
