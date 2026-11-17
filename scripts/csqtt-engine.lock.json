@@ -16,6 +16,7 @@
     "armeabi-v7a",
     "x86_64"
   ],
+  "cargoDir": "rust-client",
   "cargoPackage": "csqtt-client",
   "cargoBinary": "client",
   "binaryName": "libcsqtt.so",

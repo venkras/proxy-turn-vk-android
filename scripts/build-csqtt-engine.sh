@@ -52,6 +52,7 @@ rust_version="$(jq -r '.rust // empty' "$LOCK_FILE")"
 cargo_ndk_version="$(jq -r '.cargoNdk // empty' "$LOCK_FILE")"
 ndk_version="$(jq -r '.ndk // empty' "$LOCK_FILE")"
 api_level="$(jq -r '.api // empty' "$LOCK_FILE")"
+cargo_dir_rel="$(jq -r '.cargoDir // "rust-client"' "$LOCK_FILE")"
 cargo_binary="$(jq -r '.cargoBinary // "client"' "$LOCK_FILE")"
 binary_name="$(jq -r '.binaryName // "libcsqtt.so"' "$LOCK_FILE")"
 max_size="$(jq -r '.maxSizeBytes // 12582912' "$LOCK_FILE")"
@@ -109,13 +110,12 @@ else
   SOURCE_DIR="$ROOT_DIR/build/csqtt-engine/src"
 fi
 
-CARGO_MANIFEST="$SOURCE_DIR/rust-client/Cargo.toml"
-if [[ "$LOCAL_SOURCE" == 1 && ! -f "$CARGO_MANIFEST" ]]; then
-  die "CSQTT_ENGINE_DIR does not look like the upstream repo: $CARGO_MANIFEST not found"
-fi
+CARGO_DIR="$SOURCE_DIR/$cargo_dir_rel"
+CARGO_MANIFEST="$CARGO_DIR/Cargo.toml"
 
 verify_source_version() {
   local actual
+  [[ -f "$CARGO_MANIFEST" ]] || die "CSQTT client crate not found: $CARGO_MANIFEST (expected lock file cargoDir '$cargo_dir_rel')"
   actual="$(sed -n 's/^version[[:space:]]*=[[:space:]]*"\([^"]*\)".*/\1/p' "$CARGO_MANIFEST" | head -n 1)"
   if [[ -n "$actual" && "$actual" != "$version" ]]; then
     die "source version mismatch: Cargo.toml says '$actual', lock file says '$version'"
@@ -236,11 +236,15 @@ mkdir -p "$TARGET_DIR" "$JNI_DIR"
 jobs="${CSQTT_BUILD_JOBS:-$(getconf _NPROCESSORS_ONLN 2>/dev/null || echo 4)}"
 
 log "Rust: $rustc_actual | NDK: ${ndk_actual:-$NDK_DIR} | API: $api_level"
+log "crate: $CARGO_MANIFEST"
 log "targets: ${requested_abis[*]}"
 
 for abi in "${requested_abis[@]}"; do
   triple="$(triple_for "$abi")"
   log "building $abi ($triple) ..."
+  # cargo-ndk runs `cargo metadata` in the current directory before building,
+  # so the command must execute from the client crate root; otherwise Cargo
+  # looks for Cargo.toml in the repository root and fails.
   # aws-lc-sys (pulled in by turn-rustls) builds C/asm through CMake.
   # The cmake crate maps the Rust target to CMAKE_SYSTEM_NAME=Android and
   # CMAKE_SYSTEM_PROCESSOR, and CMake's Android platform resolves the ABI
@@ -248,14 +252,17 @@ for abi in "${requested_abis[@]}"; do
   # toolchain file present CMake would skip that mapping and fall back to
   # armeabi-v7a for every target. ANDROID_NDK* are needed so CMake and
   # aws-lc-sys find the pinned NDK non-interactively.
-  ANDROID_NDK="$NDK_DIR" \
-  ANDROID_NDK_ROOT="$NDK_DIR" \
-    cargo ndk -t "$abi" -P "$api_level" build \
-      --release \
-      --locked \
-      --jobs "$jobs" \
-      --manifest-path "$CARGO_MANIFEST" \
-      --target-dir "$TARGET_DIR"
+  (
+    cd "$CARGO_DIR"
+    ANDROID_NDK="$NDK_DIR" \
+    ANDROID_NDK_ROOT="$NDK_DIR" \
+      cargo ndk -t "$abi" -P "$api_level" build \
+        --release \
+        --locked \
+        --jobs "$jobs" \
+        --manifest-path "$CARGO_MANIFEST" \
+        --target-dir "$TARGET_DIR"
+  )
 
   artifact="$TARGET_DIR/$triple/release/$cargo_binary"
   [[ -f "$artifact" ]] || die "build finished but artifact is missing: $artifact"
