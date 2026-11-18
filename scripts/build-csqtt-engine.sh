@@ -153,6 +153,89 @@ fetch_git_source() {
   log "source pinned at $commit ($tag)"
 }
 
+# rust-client/sni.rs does include_str!("../domains.txt"), i.e. the file must
+# live in the repository root. Upstream 2.5.0 only commits
+# app/src/main/assets/domains.txt, so materialize the root copy from the same
+# checkout. If neither file exists, write a deterministic baseline list.
+write_fallback_domains() {
+  local out="$1"
+  cat >"$out" <<'EOF'
+# qWDTT fallback SNI template list for the CSQTT engine.
+# Upstream 2.5.0 does not commit rust-client/../domains.txt and the Android
+# asset copy was not found either, so this deterministic list is generated.
+# Format: one domain per line (suffix match); '#' starts a comment.
+yandex.net
+yandex.ru
+yandex.com
+yandex.by
+yandex.kz
+yandex.uz
+ya.ru
+yastatic.net
+vk.com
+vk.me
+userapi.com
+vk-cdn.net
+vkvideo.ru
+mail.ru
+imgsmail.ru
+mycdn.me
+wildberries.ru
+wbstatic.net
+ozon.ru
+ozonusercontent.com
+avito.ru
+avito.st
+kinopoisk.ru
+rutube.ru
+dzen.ru
+gosuslugi.ru
+sber.ru
+sberbank.ru
+EOF
+}
+
+check_embedded_includes() {
+  local dirs=("$CARGO_DIR" "$SOURCE_DIR/shared")
+  local dir file rel missing=0
+  for dir in "${dirs[@]}"; do
+    [[ -d "$dir" ]] || continue
+    while IFS= read -r file; do
+      while IFS= read -r rel; do
+        [[ -n "$rel" ]] || continue
+        # Skip computed paths such as include_str!(concat!(env!("OUT_DIR"), ..)).
+        [[ "$rel" == *'$'* ]] && continue
+        if [[ ! -f "$(dirname "$file")/$rel" ]]; then
+          warn "embedded file missing: ${file#"$SOURCE_DIR"/} -> $rel"
+          missing=1
+        fi
+      done < <(grep -oE 'include_(str|bytes)!\("[^"]+"\)' "$file" 2>/dev/null |
+        sed -E 's/^[^(]*\("(.*)"\)$/\1/')
+    done < <(find "$dir" \( -name target -o -name .git \) -prune -o -name '*.rs' -type f -print)
+  done
+  [[ "$missing" == 0 ]] || die "embedded file(s) referenced by the crate are missing; see warnings above"
+}
+
+ensure_embedded_sources() {
+  local root_domains="$SOURCE_DIR/domains.txt"
+  local assets_domains="$SOURCE_DIR/app/src/main/assets/domains.txt"
+  local entries
+
+  if [[ ! -s "$root_domains" ]]; then
+    if [[ -s "$assets_domains" ]]; then
+      cp -f "$assets_domains" "$root_domains"
+      log "materialized domains.txt from app/src/main/assets/domains.txt"
+    else
+      write_fallback_domains "$root_domains"
+      warn "upstream domains.txt not found; generated baseline SNI template list"
+    fi
+  fi
+
+  entries="$(grep -cvE '^[[:space:]]*(#|$)' "$root_domains" || true)"
+  log "domains.txt: ${entries:-0} entries, $(wc -c <"$root_domains" | tr -d ' ') bytes"
+  check_embedded_includes
+}
+
 if [[ "$LOCAL_SOURCE" == 1 ]]; then
   if [[ -d "$SOURCE_DIR/.git" ]]; then
     actual_commit="$(git -C "$SOURCE_DIR" rev-parse HEAD 2>/dev/null || true)"
@@ -168,6 +251,8 @@ else
   fetch_git_source
   verify_source_version
 fi
+
+ensure_embedded_sources
 
 if [[ -n "$archive_sha" ]]; then
   log "reference archive sha256: $archive_sha"
