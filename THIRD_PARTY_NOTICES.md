@@ -35,8 +35,9 @@ Required Notice: Redistributions and derivative works must retain attribution to
 
 Коммерческое использование движка CSQTT без отдельной письменной
 лицензии правообладателя не допускается. Условия распространения и
-порядок запроса разрешения описаны в
-`docs/csqtt-mode/LICENSE-NOTES.md`.
+порядок запроса разрешения — в полном тексте лицензии
+`app/src/main/assets/licenses/CSQTT-LICENSE` и на странице апстрима
+<https://github.com/amurcanov/csqtt>.
 
 ## Прочие компоненты
 

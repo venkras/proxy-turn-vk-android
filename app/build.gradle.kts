@@ -158,17 +158,9 @@ tasks.register<Exec>("buildServerAsset") {
     group = "build"
     description = "Build Linux server binary and copy it into app assets"
     workingDir = rootDir
-    environment("GOOS", "linux")
-    environment("GOARCH", "amd64")
-    environment("CGO_ENABLED", "0")
-    commandLine(
-        "go",
-        "build",
-        "-trimpath",
-        "-o",
-        rootDir.resolve("app/src/main/assets/server").absolutePath,
-        "./server",
-    )
+    // The script refreshes go.sum (`go mod download`) before `go build`, so a
+    // clean checkout cannot fail with "missing go.sum entry".
+    commandLine("bash", rootDir.resolve("scripts/build-server-asset.sh").absolutePath)
 }
 
 tasks.register<Exec>("buildCsqttEngine") {

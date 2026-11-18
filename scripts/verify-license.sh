@@ -12,7 +12,6 @@ ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 JNI_DIR="$ROOT_DIR/app/src/main/jniLibs"
 LICENSE_FILE="$ROOT_DIR/app/src/main/assets/licenses/CSQTT-LICENSE"
 NOTICES_FILE="$ROOT_DIR/THIRD_PARTY_NOTICES.md"
-LICENSE_NOTES_FILE="$ROOT_DIR/docs/csqtt-mode/LICENSE-NOTES.md"
 PROVENANCE_FILE="$ROOT_DIR/app/src/main/assets/csqtt-engine.json"
 
 ERRORS=0
@@ -76,10 +75,6 @@ if [[ "$engine_present" == 1 ]]; then
     grep -qi 'PolyForm' "$NOTICES_FILE" || fail "$NOTICES_FILE has no PolyForm mention"
     grep -q 'amurcanov' "$NOTICES_FILE" || fail "$NOTICES_FILE has no upstream author"
     grep -q 'Required Notice:' "$NOTICES_FILE" || fail "$NOTICES_FILE has no Required Notice lines"
-  fi
-
-  if [[ ! -f "$LICENSE_NOTES_FILE" ]]; then
-    fail "missing $LICENSE_NOTES_FILE"
   fi
 
   if [[ ! -f "$PROVENANCE_FILE" ]]; then

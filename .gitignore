@@ -13,7 +13,9 @@ app/build/
 app/release/
 
 # ===== Go =====
-go.sum
+# go.sum is committed on purpose: CI builds ./server with `go build`, and a
+# missing checksum file aborts the build ("missing go.sum entry"). Keep the
+# pinned dependency hashes in the repository instead of ignoring them.
 
 # ===== Native Libraries (compiled) =====
 *.so

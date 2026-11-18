@@ -17,17 +17,6 @@ qWDTT — Android-приложение для подключения к собс
 - стабильные подписанные версии публикуются в [GitHub Releases](https://github.com/SpaceNeuroX/proxy-turn-vk-android/releases);
 - тестовые debug-сборки ветки `develop` доступны в [GitHub Actions](https://github.com/SpaceNeuroX/proxy-turn-vk-android/actions/workflows/android-debug.yml).
 
-## Режимы подключения
-
-По умолчанию qWDTT работает по протоколу WDTT и полностью совместим со
-старыми серверами и профилями. Дополнительно развивается режим
-подключения к CSQTT-серверам: отдельный Rust-движок, который собирается
-из зафиксированного тега и включается флагом `-PcsqttEngine=true`.
-Текущий статус — документация и сборочный конвейер; runtime-интеграция
-появится в следующих релизах.
-
-Подробности: [docs/csqtt-mode/](docs/csqtt-mode/README.md).
-
 ## Обсуждение и поддержка
 
 - [Группа qWDTT в Telegram](https://t.me/darkbit_chat)
@@ -36,6 +25,8 @@ qWDTT — Android-приложение для подключения к собс
 ## Лицензия
 
 Проект распространяется по лицензии [GNU GPL v3](LICENSE).
+
+Уведомления о сторонних компонентах: [THIRD_PARTY_NOTICES.md](THIRD_PARTY_NOTICES.md).
 
 ## Происхождение проекта
 
