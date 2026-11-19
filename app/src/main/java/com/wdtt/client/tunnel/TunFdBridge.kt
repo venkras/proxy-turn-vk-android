@@ -77,4 +77,66 @@ object TunFdBridge {
         diag("sendOnce: не удалось подключиться к go_client за $MAX_ATTEMPTS попыток, сдаюсь", isError = true)
         throw IllegalStateException("TunFdBridge.sendOnce: не удалось подключиться к go_client за $MAX_ATTEMPTS попыток", lastError)
     }
+
+    /**
+     * Вариант [sendOnce] для Rust-движка CSQTT: после передачи fd ждёт один
+     * байт ACK (`1`) от получателя (см. `csqtt-main/rust-client/tun.rs`).
+     *
+     * В отличие от go_client, движок CSQTT подтверждает приём дескриптора,
+     * поэтому здесь важно не переслать fd повторно: после успешной записи
+     * ретраев нет, иначе Rust получит второй TUN и потеряет первый.
+     *
+     * @return `true`, если получен ACK `1`; `false`, если байт пришёл другой
+     *   или чтение не удалось после отправки fd.
+     */
+    suspend fun sendAndAwaitAck(
+        name: String,
+        pfd: ParcelFileDescriptor,
+        ackTimeoutMs: Long = 5_000L,
+    ): Boolean = withContext(Dispatchers.IO) {
+        var lastError: Throwable? = null
+        for (attempt in 1..MAX_ATTEMPTS) {
+            var client: LocalSocket? = null
+            var sent = false
+            try {
+                diag("sendAndAwaitAck попытка #$attempt: connect() на $name")
+                client = LocalSocket()
+                client.connect(LocalSocketAddress(name, LocalSocketAddress.Namespace.ABSTRACT))
+                diag("sendAndAwaitAck попытка #$attempt: connect() OK, отправляю fd...")
+                client.setFileDescriptorsForSend(arrayOf(pfd.fileDescriptor))
+                // Сами байты не важны — факт отправки несёт ancillary-данные с fd.
+                client.outputStream.write(1)
+                client.outputStream.flush()
+                sent = true
+                diag("TUN fd отправлен в CSQTT через $name (попытка #$attempt), жду ACK...")
+                client.soTimeout = ackTimeoutMs.coerceIn(1L, Int.MAX_VALUE.toLong()).toInt()
+                val ack = client.inputStream.read()
+                if (ack == ACK_BYTE) {
+                    diag("sendAndAwaitAck: ACK получен от CSQTT через $name (попытка #$attempt)")
+                    return@withContext true
+                }
+                diag("sendAndAwaitAck: неожиданный ACK=$ack (ожидался $ACK_BYTE) от $name", isError = true)
+                return@withContext false
+            } catch (e: Exception) {
+                lastError = e
+                diag("sendAndAwaitAck попытка #$attempt FAILED: ${e.javaClass.simpleName}: ${e.message}", isError = true)
+                if (sent) {
+                    // fd уже ушёл в сокет — повторная отправка создаст второй TUN.
+                    diag("sendAndAwaitAck: fd уже отправлен, ACK не получен — повтор не делаю", isError = true)
+                    return@withContext false
+                }
+            } finally {
+                runCatching { client?.close() }
+            }
+            delay(CONNECT_RETRY_DELAY_MS)
+        }
+        diag("sendAndAwaitAck: не удалось подключиться к CSQTT за $MAX_ATTEMPTS попыток, сдаюсь", isError = true)
+        throw IllegalStateException(
+            "TunFdBridge.sendAndAwaitAck: не удалось подключиться к CSQTT за $MAX_ATTEMPTS попыток",
+            lastError,
+        )
+    }
+
+    /** Байт подтверждения приёма fd в протоколе CSQTT (`tun.rs`). */
+    private const val ACK_BYTE = 1
 }

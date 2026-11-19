@@ -14,6 +14,7 @@ import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.filled.ContentCopy
 import androidx.compose.material.icons.filled.Save
+import androidx.compose.material.icons.filled.Share
 import androidx.compose.material3.*
 import androidx.compose.runtime.*
 import androidx.compose.ui.Alignment
@@ -30,6 +31,9 @@ import com.google.zxing.EncodeHintType
 import com.google.zxing.qrcode.QRCodeWriter
 import com.wdtt.client.ConnectionProfile
 import com.wdtt.client.PeerAddress
+import com.wdtt.client.SettingsStore
+import com.wdtt.client.csqtt.CsqttDefaults
+import com.wdtt.client.csqtt.CsqttLinkParser
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
@@ -46,14 +50,31 @@ fun ExportProfileSheet(
     val scope = rememberCoroutineScope()
     var qrBitmap by remember { mutableStateOf<Bitmap?>(null) }
 
+    val isCsqtt = profile.isCsqtt
     val link = remember(profile, serverDtlsPort) {
-        val exportPeer = PeerAddress.ensurePort(profile.peer, serverDtlsPort)
-        val nameEsc = URLEncoder.encode(profile.name, "UTF-8")
-        val peerEsc = URLEncoder.encode(exportPeer, "UTF-8")
-        val hashesEsc = URLEncoder.encode(profile.vkHashes, "UTF-8")
-        val passEsc = URLEncoder.encode(profile.password, "UTF-8")
-        val dkPart = if (profile.diagKey.isNotBlank()) "&dk=" + URLEncoder.encode(profile.diagKey, "UTF-8") else ""
-        "qwdtt://config?name=$nameEsc&peer=$peerEsc&hashes=$hashesEsc&workers=${profile.workersPerHash}&port=${profile.listenPort}&pass=$passEsc$dkPart"
+        if (isCsqtt) {
+            val host = PeerAddress.host(profile.peer)
+            val port = PeerAddress.port(profile.peer) ?: CsqttDefaults.DEFAULT_PEER_PORT
+            val hashes = profile.vkHashes
+                .split(Regex("[,\\s\\n]+"))
+                .map { it.trim() }
+                .filter { it.isNotEmpty() }
+            CsqttLinkParser.format(
+                host = host,
+                port = port,
+                password = profile.password,
+                hashes = hashes,
+                token = profile.csqttAccessToken.trim(),
+            )
+        } else {
+            val exportPeer = PeerAddress.ensurePort(profile.peer, serverDtlsPort)
+            val nameEsc = URLEncoder.encode(profile.name, "UTF-8")
+            val peerEsc = URLEncoder.encode(exportPeer, "UTF-8")
+            val hashesEsc = URLEncoder.encode(profile.vkHashes, "UTF-8")
+            val passEsc = URLEncoder.encode(profile.password, "UTF-8")
+            val dkPart = if (profile.diagKey.isNotBlank()) "&dk=" + URLEncoder.encode(profile.diagKey, "UTF-8") else ""
+            "qwdtt://config?name=$nameEsc&peer=$peerEsc&hashes=$hashesEsc&workers=${profile.workersPerHash}&port=${profile.listenPort}&pass=$passEsc$dkPart"
+        }
     }
 
     LaunchedEffect(link) {
@@ -72,12 +93,33 @@ fun ExportProfileSheet(
             try {
                 val json = org.json.JSONObject().apply {
                     put("name", profile.name)
-                    put("peer", PeerAddress.ensurePort(profile.peer, serverDtlsPort))
+                    put("peer", if (isCsqtt) {
+                        profile.peer
+                    } else {
+                        PeerAddress.ensurePort(profile.peer, serverDtlsPort)
+                    })
                     put("vkHashes", profile.vkHashes)
                     put("workersPerHash", profile.workersPerHash)
                     put("listenPort", profile.listenPort)
                     put("password", profile.password)
                     if (profile.diagKey.isNotBlank()) put("diagKey", profile.diagKey)
+                    if (isCsqtt) {
+                        put("serverProtocol", SettingsStore.SERVER_PROTOCOL_CSQTT)
+                        put("csqttObfs", profile.csqttObfs)
+                        put("csqttTransport", profile.csqttTransport)
+                        put("csqttSrtp", profile.csqttSrtp)
+                        put("csqttFingerprint", profile.csqttFingerprint)
+                        put("csqttHashMode", profile.csqttHashMode)
+                        if (profile.csqttAccessToken.isNotBlank()) {
+                            put("csqttAccessToken", profile.csqttAccessToken)
+                        }
+                        if (profile.csqttClientIds.isNotBlank()) put("csqttClientIds", profile.csqttClientIds)
+                        if (profile.csqttCustomTurnIps.isNotBlank()) put("csqttCustomTurnIps", profile.csqttCustomTurnIps)
+                        put("csqttDomainRouting", profile.csqttDomainRouting)
+                        put("csqttExcludeRuZones", profile.csqttExcludeRuZones)
+                        if (profile.csqttDirectDomains.isNotBlank()) put("csqttDirectDomains", profile.csqttDirectDomains)
+                        if (profile.csqttDirectIps.isNotBlank()) put("csqttDirectIps", profile.csqttDirectIps)
+                    }
                 }.toString(2)
                 context.contentResolver.openOutputStream(uri)?.use {
                     it.write(json.toByteArray())
@@ -142,7 +184,11 @@ fun ExportProfileSheet(
 
             Spacer(modifier = Modifier.height(24.dp))
             Text(
-                "Отсканируйте код другим устройством в приложении qWDTT",
+                if (isCsqtt) {
+                    "Отсканируйте код или вставьте ссылку csqtt:// в приложении qWDTT"
+                } else {
+                    "Отсканируйте код другим устройством в приложении qWDTT"
+                },
                 style = MaterialTheme.typography.bodySmall,
                 color = MaterialTheme.colorScheme.onSurfaceVariant,
                 textAlign = TextAlign.Center
@@ -157,7 +203,7 @@ fun ExportProfileSheet(
                 Button(
                     onClick = {
                         val clipboard = context.getSystemService(Context.CLIPBOARD_SERVICE) as ClipboardManager
-                        clipboard.setPrimaryClip(ClipData.newPlainText("WDTT Profile", link))
+                        clipboard.setPrimaryClip(ClipData.newPlainText("qWDTT Profile", link))
                         Toast.makeText(context, "Ссылка скопирована", Toast.LENGTH_SHORT).show()
                     },
                     modifier = Modifier.weight(1f).height(50.dp),
@@ -167,6 +213,39 @@ fun ExportProfileSheet(
                     Icon(Icons.Default.ContentCopy, null, tint = MaterialTheme.colorScheme.onSecondaryContainer, modifier = Modifier.size(20.dp))
                     Spacer(Modifier.width(8.dp))
                     Text("Ссылка", color = MaterialTheme.colorScheme.onSecondaryContainer, fontSize = 15.sp, fontWeight = FontWeight.Bold)
+                }
+
+                if (isCsqtt) {
+                    Button(
+                        onClick = {
+                            val shareIntent = android.content.Intent(android.content.Intent.ACTION_SEND).apply {
+                                type = "text/plain"
+                                putExtra(android.content.Intent.EXTRA_TEXT, link)
+                            }
+                            runCatching {
+                                context.startActivity(
+                                    android.content.Intent.createChooser(shareIntent, "Поделиться ссылкой CSQTT")
+                                )
+                            }
+                        },
+                        modifier = Modifier.weight(1f).height(50.dp),
+                        colors = ButtonDefaults.buttonColors(containerColor = MaterialTheme.colorScheme.tertiaryContainer),
+                        shape = RoundedCornerShape(16.dp)
+                    ) {
+                        Icon(
+                            Icons.Default.Share,
+                            null,
+                            tint = MaterialTheme.colorScheme.onTertiaryContainer,
+                            modifier = Modifier.size(20.dp)
+                        )
+                        Spacer(Modifier.width(8.dp))
+                        Text(
+                            "Поделиться",
+                            color = MaterialTheme.colorScheme.onTertiaryContainer,
+                            fontSize = 15.sp,
+                            fontWeight = FontWeight.Bold
+                        )
+                    }
                 }
 
                 Button(

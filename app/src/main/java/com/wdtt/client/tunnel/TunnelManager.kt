@@ -23,6 +23,18 @@ import java.net.InetSocketAddress
 import java.util.concurrent.TimeUnit
 import kotlin.math.min
 import kotlin.math.pow
+import com.wdtt.client.csqtt.CsqttAuthDenial
+import com.wdtt.client.csqtt.CsqttCaptchaBridge
+import com.wdtt.client.csqtt.CsqttConfig
+import com.wdtt.client.csqtt.CsqttControl
+import com.wdtt.client.csqtt.CsqttDefaults
+import com.wdtt.client.csqtt.CsqttEngine
+import com.wdtt.client.csqtt.CsqttEngineListener
+import com.wdtt.client.csqtt.CsqttExitCodes
+import com.wdtt.client.csqtt.CsqttLogEntry
+import com.wdtt.client.csqtt.CsqttOutput
+import com.wdtt.client.csqtt.CsqttSecrets
+import com.wdtt.client.csqtt.CsqttTunConf
 
 import androidx.compose.runtime.Stable
 
@@ -116,6 +128,12 @@ object TunnelManager {
     @Volatile private var pendingManualDiag = false
     /** Экран включён — Go реже шлёт keepalive, пока он выключен (go_client/liveness.go). */
     @Volatile private var screenOn = true
+    /** Активен ли сейчас CSQTT-движок (pause/resume/stop и режимы сервиса). */
+    @Volatile private var csqttActive = false
+    /** Fatal-ошибка CSQTT уже обработана — гасим повторы реконнекта. */
+    @Volatile private var csqttFatal = false
+    /** Текст последней fatal-ошибки CSQTT (для reconnect/await). */
+    @Volatile private var csqttFatalReason: String? = null
     /** Строки в stdin Go-процесса пишутся из разных потоков — не даём им перемешаться. */
     private val goStdinLock = Any()
     /** Плановый рестарт транспорта (смена сети): log reader не должен сбрасывать running. */
@@ -260,7 +278,14 @@ object TunnelManager {
         )
     }
 
-    private fun updateLog(key: String, message: String, priority: Int, isError: Boolean = false) {
+    private fun updateLog(
+        key: String,
+        message: String,
+        priority: Int,
+        isError: Boolean = false,
+        verboseOnly: Boolean = false,
+    ) {
+        if (verboseOnly && !isDetailedLogsEnabled && !isError) return
         if (isError) {
             val list = logs.value
             if (list.none { it.key == key }) {
@@ -291,6 +316,9 @@ object TunnelManager {
 
     fun start(context: Context, params: TunnelParams, isSwitching: Boolean = false, forceStart: Boolean = false) {
         android.util.Log.d("WDTT", "TunnelManager.start() called. isSwitching=$isSwitching, forceStart=$forceStart, running=${running.value}, connecting=${isConnecting.value}")
+        // Снимок до перезаписи currentParams: при переходе CSQTT -> Go нужно
+        // погасить Rust-движок, иначе на VpnService останутся два транспорта.
+        val previousParamsSnapshot = currentParams
         synchronized(startGate) {
             if (running.value && !isSwitching) return
             // Повторный START (сервис/UI) не должен убивать текущий вход в звонок.
@@ -385,6 +413,22 @@ object TunnelManager {
                         activeProfileId = ""
                     }
                 }
+
+                // ── CSQTT: Rust-движок libcsqtt.so ────────────────────────────
+                // Ветка полностью отдельная: Go-процесс, WireGuard и rawtun
+                // ниже не запускаются, поэтому их поведение не меняется.
+                if (params.isCsqttMode) {
+                    stopOtherTransportsForCsqtt(appContext)
+                    startCsqtt(appContext, params, isSwitching)
+                    return@launch
+                }
+                // Переключение CSQTT -> vpn/rawtun/socks: движок обязан умереть.
+                if (previousParamsSnapshot?.isCsqttMode == true) {
+                    stopCsqttEngine(force = true)
+                    csqttFatal = false
+                    csqttFatalReason = null
+                }
+
                 val targetHash = if (activeHashIndex == 0) params.vkHashes else params.secondaryVkHash
                 
                 // Robust hash parsing: split by comma, newline, or whitespace
@@ -734,13 +778,35 @@ object TunnelManager {
      * stopService), так что runBlocking здесь не создаёт заметной задержки.
      */
     private fun stopRawTunIfNeeded() {
-        if (currentParams?.isRawTunMode != true) return
-        val ctx = lastContext?.get() ?: return
-        runBlocking { runCatching { RawTunEngine.stop(ctx) } }
+        val params = currentParams
+        val isCsqtt = params?.isCsqttMode == true
+        if (!isCsqtt && params?.isRawTunMode != true) return
+        if (isCsqtt) csqttActive = false
+        val ctx = lastContext?.get()
+        runBlocking {
+            if (isCsqtt) runCatching { CsqttEngine.stop(force = true) }
+            if (ctx != null) runCatching { RawTunEngine.stop(ctx) }
+        }
     }
 
     /** Вызывается из RawTunVpnService.onRevoke() — система сама отозвала VPN-разрешение. */
     fun onRawTunRevoked() {
+        if (csqttActive || currentParams?.isCsqttMode == true) {
+            // Разрешение отозвано системой: перезапуск движка не поможет и
+            // только оставит висящий процесс — глушим без reconnect.
+            csqttActive = false
+            csqttFatal = true
+            markRunning(false)
+            isConnecting.value = false
+            activeWorkers.value = 0
+            val ctx = lastContext?.get()
+            scope.launch {
+                runCatching { CsqttEngine.stop(force = true) }
+                runCatching { RawTunEngine.onVpnRevoked() }
+                if (ctx != null) runCatching { RawTunEngine.stop(ctx) }
+            }
+            return
+        }
         RawTunEngine.onVpnRevoked()
     }
 
@@ -1387,6 +1453,220 @@ object TunnelManager {
         diagnostics.value = DiagnosticsState()
     }
 
+    // ==================== CSQTT (Rust-движок) ====================
+
+    /**
+     * Перед запуском CSQTT гасим всё, что могло занять VpnService/TUN:
+     * Go-процесс, WireGuard-интерфейс и Raw TUN. Каждый шаг — best effort,
+     * чтобы переход WG -> CSQTT и Raw -> CSQTT не давал «address already in use».
+     */
+    private suspend fun stopOtherTransportsForCsqtt(context: Context) {
+        watchdogJob?.cancel()
+        watchdogJob = null
+        readerJob?.cancel()
+        readerJob = null
+        runCatching { stopGoProcessGracefully() }
+        runCatching { wgHelper?.stopTunnel() }
+        runCatching { RawTunEngine.stop(context) }
+    }
+
+    /**
+     * Единая точка остановки движка CSQTT. Гасит и процесс, и TUN, и
+     * сбрасывает состояние менеджера — безопасно вызывать повторно.
+     */
+    private suspend fun stopCsqttEngine(force: Boolean) {
+        val hadCsqtt = csqttActive || CsqttEngine.isAlive() || currentParams?.isCsqttMode == true
+        csqttActive = false
+        runCatching { CsqttEngine.stop(force = force) }
+        if (hadCsqtt) {
+            val ctx = lastContext?.get()
+            if (ctx != null) runCatching { RawTunEngine.stop(ctx) }
+        }
+    }
+
+    /**
+     * Запускает Rust-движок. Возвращается сразу после старта процесса:
+     * TUN поднимает обработчик [CsqttEngineListener.onTunReady] (по TUNCONF).
+     */
+    private fun startCsqtt(context: Context, params: TunnelParams, isSwitching: Boolean) {
+        if (!CsqttEngine.isBundled(context)) {
+            val message = CsqttEngine.missingBinaryMessage(context)
+            updateLog("csqtt_missing_binary", "[CSQTT] $message", 99, true)
+            lastFatalError.value = message
+            csqttFatal = true
+            csqttFatalReason = message
+            csqttActive = false
+            abortStart(isSwitching, message)
+            return
+        }
+        val config = params.resolvedCsqttConfig()
+        val problems = config.problems().filter { it.isFatal }
+        if (problems.isNotEmpty()) {
+            val message = problems.joinToString("; ") { it.message }
+            updateLog("csqtt_config_error", "[CSQTT] $message", 99, true)
+            lastFatalError.value = message
+            csqttFatal = true
+            csqttFatalReason = message
+            csqttActive = false
+            abortStart(isSwitching, message)
+            return
+        }
+
+        csqttFatal = false
+        csqttFatalReason = null
+        csqttActive = true
+        updateLog("csqtt_start", "[CSQTT] ${CsqttSecrets.describeConfig(config)}", 1, false)
+        setConnectionPipelineCurrent(ConnectionStep.WRAP)
+        val listener = createCsqttListener()
+        scope.launch {
+            val result = CsqttEngine.start(context, config, listener)
+            if (result.isFailure) {
+                val error = result.exceptionOrNull()
+                val message = error?.message ?: "Не удалось запустить движок CSQTT"
+                csqttActive = false
+                csqttFatal = true
+                csqttFatalReason = message
+                runCatching { RawTunEngine.stop(context) }
+                updateLog(
+                    "csqtt_start_failed_${message.hashCode()}",
+                    "[CSQTT] $message",
+                    99,
+                    true,
+                )
+                lastFatalError.value = message
+                if (isSwitching) {
+                    handleSwitchingStartFailed(message)
+                } else {
+                    finishConnectingFailed()
+                }
+            }
+        }
+    }
+
+    private fun createCsqttListener(): CsqttEngineListener = object : CsqttEngineListener {
+        override fun onLog(entry: CsqttLogEntry) {
+            // Движок уже редактирует секреты; повторная редакция — страховка
+            // для строк, пришедших не через CsqttLogMapper.
+            val safe = CsqttSecrets.redactLine(entry.message, CsqttEngine.currentSecrets())
+            updateLog(
+                key = entry.key,
+                message = safe,
+                priority = entry.priority,
+                isError = entry.isError,
+                verboseOnly = entry.verboseOnly,
+            )
+        }
+
+        override fun onStateChanged(running: Boolean) {
+            if (!running) {
+                csqttActive = false
+            }
+        }
+
+        override fun onTunReady(conf: CsqttTunConf) {
+            csqttActive = true
+            isConnecting.value = false
+            connectionPipeline.update { state ->
+                if (!state.visible) {
+                    state
+                } else {
+                    state.copy(
+                        current = ConnectionStep.DONE,
+                        completed = state.stepsToShow().toSet() + ConnectionStep.DONE,
+                        failed = null,
+                        timedOut = false,
+                        transportKind = ConnectionTransportKind.RAW,
+                        dtlsUsed = false,
+                    )
+                }
+            }
+            cancelPipelineStepTimeout()
+            if (!running.value) markRunning(true)
+            stats.value = if (conf.clientIp.isNotBlank()) "CSQTT ${conf.clientIp}" else "CSQTT"
+        }
+
+        override fun onStats(stats: String, active: Int, bytesUp: Long, bytesDown: Long) {
+            this@TunnelManager.stats.value = stats
+            activeWorkers.value = active
+            lastStatsReceivedAtMs = System.currentTimeMillis()
+            if (active > 0) {
+                lastActiveAtMs = lastStatsReceivedAtMs
+            }
+        }
+
+        override fun onCaptchaRequested(request: CsqttOutput.CaptchaRequest) {
+            markConnectionPipelineCaptchaRequired()
+            stats.value = "CSQTT: ожидание капчи…"
+        }
+
+        override fun onRouting(routing: String) {
+            updateLog(
+                "csqtt_routing",
+                "[CSQTT] Правила маршрутизации получены (${routing.length} байт)",
+                3,
+                false,
+                verboseOnly = true,
+            )
+        }
+
+        override fun onTunLost() {
+            updateLog("csqtt_tun_lost", "[CSQTT] TUN потерян — переподключение", 99, true)
+            failConnectionPipeline(ConnectionStep.RAW)
+        }
+
+        override fun onReconnectRequested(reason: String) {
+            if (!csqttActive || csqttFatal) return
+            // Без force: общий MIN_RECONNECT_INTERVAL_MS не даст движку,
+            // который повторяет одно и то же событие, крутить реконнект в цикле.
+            scope.launch {
+                reconnectAll(reason)
+            }
+        }
+
+        override fun onFatalError(message: String) {
+            csqttFatal = true
+            csqttActive = false
+            val safe = CsqttSecrets.redactLine(message, CsqttEngine.currentSecrets())
+            csqttFatalReason = safe
+            finishConnectingFailed()
+            updateLog("csqtt_fatal_${safe.hashCode()}", "[CSQTT] $safe", 99, true)
+            lastFatalError.value = safe
+        }
+
+        override fun onAuthDenied(denial: CsqttAuthDenial) {
+            csqttFatal = true
+            csqttActive = false
+            csqttFatalReason = denial.userMessage
+            finishConnectingFailed()
+            updateLog(
+                "csqtt_auth_${denial.name.lowercase()}",
+                "[CSQTT] ${denial.userMessage}",
+                99,
+                true,
+            )
+            lastFatalError.value = denial.userMessage
+        }
+
+        override fun onProcessExited(exitCode: Int) {
+            val wasActive = csqttActive
+            csqttActive = false
+            if (csqttFatal) return
+            if (exitCode == CsqttExitCodes.NORMAL) return
+            if (transportRestartInProgress) return
+            // TUN потерян или аварийный выход при живом туннеле: поднимаем
+            // сессию заново по общей политике reconnect (без своих циклов).
+            if (running.value || wasActive) {
+                val message = CsqttExitCodes.message(exitCode)
+                if (message != null) {
+                    updateLog("csqtt_exit_$exitCode", "[CSQTT] $message", 99, true)
+                }
+                // Одноразовое событие: пропустить его из-за троттлинга нельзя,
+                // иначе туннель останется мёртвым без повторного триггера.
+                scope.launch { reconnectAll("движок CSQTT завершился ($exitCode)", force = true) }
+            }
+        }
+    }
+
     private fun handleCriticalError(message: String) {
         updateLog("circuit_breaker", "[СТОП] $message", -1, true)
         stop()
@@ -1542,21 +1822,28 @@ object TunnelManager {
                     keepWireGuardOnNextConfig = false
                     preservedWireGuardConfig = null
                     withContext(Dispatchers.IO) {
-                        ensureTransportStopped(params.port)
-                        if (params.isRawTunMode) {
-                            if (preserveVpn) {
-                                RawTunEngine.prepareForTransportRestart()
-                            } else {
-                                RawTunEngine.prepareForReconnect()
-                            }
-                        } else if (!params.isSocksMode) {
-                            if (preserveVpn) {
-                                keepWireGuardOnNextConfig = true
-                                preservedWireGuardConfig = previousWireGuardConfig
-                            } else {
-                                keepWireGuardOnNextConfig = false
-                                preservedWireGuardConfig = null
-                                wgHelper?.stopTunnel()
+                        if (params.isCsqttMode) {
+                            // CSQTT не использует UDP-порт Go и WireGuard:
+                            // гасим движок и TUN, затем поднимаем сессию заново.
+                            runCatching { CsqttEngine.send(CsqttControl.STOP) }
+                            stopCsqttEngine(force = true)
+                        } else {
+                            ensureTransportStopped(params.port)
+                            if (params.isRawTunMode) {
+                                if (preserveVpn) {
+                                    RawTunEngine.prepareForTransportRestart()
+                                } else {
+                                    RawTunEngine.prepareForReconnect()
+                                }
+                            } else if (!params.isSocksMode) {
+                                if (preserveVpn) {
+                                    keepWireGuardOnNextConfig = true
+                                    preservedWireGuardConfig = previousWireGuardConfig
+                                } else {
+                                    keepWireGuardOnNextConfig = false
+                                    preservedWireGuardConfig = null
+                                    wgHelper?.stopTunnel()
+                                }
                             }
                         }
                     }
@@ -1569,6 +1856,10 @@ object TunnelManager {
                     config.value = null
                     start(context, params, isSwitching = true)
                     startJob?.join()
+                    if (params.isCsqttMode) {
+                        awaitCsqttReady()
+                        return@withLock
+                    }
                     if (currentParams == null || process == null) return@withLock
                     if (params.isRawTunMode) {
                         awaitRawTunReady()
@@ -1591,13 +1882,25 @@ object TunnelManager {
 
     fun pause() {
         if (!running.value) return
+        if (isCsqttActive()) {
+            // Движок сам останавливает воркеры по PAUSE; TUN не закрываем,
+            // чтобы сервис не умер и после возврата сети всё поднялось.
+            CsqttEngine.pause()
+            activeWorkers.value = 0
+            return
+        }
         killProcess() // Не ставим running=false, чтоб сервис не умер
         activeWorkers.value = 0
     }
 
     fun resume() {
+        // Для CSQTT — тот же полный рестарт сессии, что и для Go: TURN/DTLS-
+        // потоки обоих движков привязаны к прежнему сетевому пути.
         restartTransport("сеть появилась", force = true)
     }
+
+    private fun isCsqttActive(): Boolean =
+        csqttActive || CsqttEngine.isAlive() || currentParams?.isCsqttMode == true
 
     private fun resetTransportTrafficHealth() {
         lastUplinkMb = 0.0
@@ -1617,6 +1920,23 @@ object TunnelManager {
             delay(100)
         }
         error("RAW TUN не поднялся за ${timeoutMs / 1000} с")
+    }
+
+    /**
+     * Ждём готовности CSQTT: процесс жив и TUN поднят (ACK получен).
+     * Ошибка — движок умер или fatal-сессия, чтобы reconnectAll не завис.
+     */
+    private suspend fun awaitCsqttReady(timeoutMs: Long = 60_000L) {
+        val deadline = System.currentTimeMillis() + timeoutMs
+        while (System.currentTimeMillis() < deadline) {
+            if (csqttFatal) {
+                error(csqttFatalReason ?: "CSQTT: сессия завершилась ошибкой")
+            }
+            if (!csqttActive && !running.value && !CsqttEngine.isAlive()) return
+            if (CsqttEngine.tunReady.value) return
+            delay(100)
+        }
+        error("CSQTT TUN не поднялся за ${timeoutMs / 1000} с")
     }
 
     private suspend fun awaitWireGuardReady(timeoutMs: Long = 20_000L) {
@@ -1774,13 +2094,21 @@ object TunnelManager {
             cancelPipelineStepTimeout()
         }
         ManlCaptchaWebViewManager.cancelCaptcha()
+        CsqttCaptchaBridge.cancel()
 
         val paramsSnapshot = currentParams
         val wgHelperSnapshot = wgHelper
+        val stoppedCsqtt = paramsSnapshot?.isCsqttMode == true || csqttActive
         currentParams = null
+        csqttActive = false
         stopJob = scope.launch(Dispatchers.IO) {
+            if (stoppedCsqtt) {
+                // Мягко: STOP в stdin, затем добиваем процесс и TUN.
+                runCatching { CsqttEngine.send(CsqttControl.STOP) }
+                runCatching { CsqttEngine.stop(force = force) }
+            }
             runCatching { stopGoProcessGracefully() }
-            if (paramsSnapshot?.isRawTunMode == true) {
+            if (paramsSnapshot?.isRawTunMode == true || stoppedCsqtt) {
                 val ctx = lastContext?.get()
                 if (ctx != null) {
                     runCatching { RawTunEngine.stop(ctx) }
@@ -1790,12 +2118,19 @@ object TunnelManager {
         }
     }
 
-    /** Режим работающего туннеля (vpn / rawtun / socks) или null, если туннеля нет. */
+    /** CSQTT выбран пользователем (S3: профиль/режим уже применены). */
+    fun isCsqttModeActive(): Boolean =
+        csqttActive || currentParams?.isCsqttMode == true || CsqttEngine.isAlive()
+
+    /** Режим работающего туннеля (vpn / rawtun / socks / csqtt) или null, если туннеля нет. */
     fun currentConnectionMode(): String? =
-        currentParams?.connectionMode?.let { SettingsStore.normalizeConnectionMode(it) }
+        when {
+            currentParams?.isCsqttMode == true -> SettingsStore.CONNECTION_MODE_CSQTT
+            else -> currentParams?.connectionMode?.let { SettingsStore.normalizeConnectionMode(it) }
+        }
 
     fun reloadWireGuard() {
-        if (running.value && currentParams?.isSocksMode != true) {
+        if (running.value && currentParams?.isSocksMode != true && currentParams?.isCsqttMode != true) {
             scope.launch {
                 wgHelper?.reloadTunnel()
             }
@@ -1927,6 +2262,10 @@ object TunnelManager {
     fun setScreenOn(on: Boolean) {
         if (screenOn == on) return
         screenOn = on
+        if (isCsqttActive()) {
+            CsqttEngine.onScreenChanged(on)
+            return
+        }
         writeGoCommand(if (on) "SCREEN_ON" else "SCREEN_OFF")
     }
 
@@ -2008,19 +2347,23 @@ object TunnelManager {
             completed = emptySet(),
             visible = true,
             transportKind = when {
+                currentParams?.isCsqttMode == true -> ConnectionTransportKind.RAW
                 currentParams?.isRawTunMode == true -> ConnectionTransportKind.RAW
                 currentParams?.isSocksMode == true -> ConnectionTransportKind.SOCKS
                 else -> ConnectionTransportKind.VPN
             },
-            // Raw и Direct(noDtls) идут напрямую RTP-obfs AEAD, без DTLS —
+            // Raw, CSQTT и Direct(noDtls) идут напрямую RTP-obfs AEAD, без DTLS —
             // шаг DTLS в схеме имеет смысл показывать только для
             // классического VPN-режима.
-            dtlsUsed = currentParams?.let { !it.noDtls && !it.isRawTunMode } ?: true,
+            dtlsUsed = currentParams?.let {
+                !it.noDtls && !it.isRawTunMode && !it.isCsqttMode
+            } ?: true,
         )
         armPipelineStepTimeout(ConnectionStep.DNS)
     }
 
     private fun transportPipelineStep(): ConnectionStep = when {
+        currentParams?.isCsqttMode == true -> ConnectionStep.RAW
         currentParams?.isRawTunMode == true -> ConnectionStep.RAW
         currentParams?.isSocksMode == true -> ConnectionStep.SOCKS
         else -> ConnectionStep.VPN
@@ -2039,6 +2382,7 @@ object TunnelManager {
     fun connectionDiagnosticsSummary(): String {
         val p = currentParams ?: return "Нет активного/последнего подключения"
         val mode = when {
+            p.isCsqttMode -> "CSQTT (Rust-движок)"
             p.isRawTunMode -> "Raw"
             p.isSocksMode -> "SOCKS5"
             else -> "VPN (WireGuard)"
@@ -2091,9 +2435,18 @@ object TunnelManager {
         else -> PIPELINE_STEP_TIMEOUT_MS
     }
 
+    /**
+     * У CSQTT свой watchdog и backoff в [CsqttEngine], а шаги схемы
+     * (DNS/WRAP/TURN) не совпадают с Go-пайплайном: вход в VK-звонок может
+     * занимать десятки секунд. Поэтому схему прогреваем, но по таймеру не
+     * рвём — иначе живая сессия убивалась бы на 10-й секунде.
+     */
+    private fun pipelineTimeoutsEnabled(): Boolean = currentParams?.isCsqttMode != true
+
     private fun armPipelineStepTimeout(step: ConnectionStep?) {
         cancelPipelineStepTimeout()
         if (step == null || step == ConnectionStep.DONE) return
+        if (!pipelineTimeoutsEnabled()) return
         // Много потоков поднимаются постепенно; капча / вход по аккаунту VK ждут пользователя.
         if (step == ConnectionStep.WORKERS || step == ConnectionStep.CAPTCHA) return
         if (step == ConnectionStep.VK && isAccountVkAuthActive()) return
@@ -2126,7 +2479,7 @@ object TunnelManager {
         )
         startJob?.cancel()
         startJob = null
-        if (running.value || process != null) {
+        if (running.value || process != null || csqttActive) {
             stopRawTunIfNeeded()
             scope.launch(Dispatchers.Main) {
                 wgHelper?.stopTunnel()
@@ -2340,16 +2693,74 @@ data class TunnelParams(
     /** Ключ диагностики сервера (dk= из ссылки), пусто — нет. */
     val diagKey: String = "",
     /** Порты сервера для проверки: "dtls=56000,direct=56002,raw=56003". */
-    val diagPorts: String = ""
+    val diagPorts: String = "",
+    /**
+     * Протокол сервера: [SettingsStore.SERVER_PROTOCOL_WDTT] (Go-клиент) или
+     * [SettingsStore.SERVER_PROTOCOL_CSQTT] (Rust-движок libcsqtt.so).
+     *
+     * Отдельно от [connectionMode]: CSQTT всегда занимает Android VpnService
+     * TUN, но в будущем может комбинироваться с SOCKS-режимом.
+     */
+    val serverProtocol: String = SettingsStore.SERVER_PROTOCOL_WDTT,
+    /** Параметры CSQTT-движка; null — собрать из полей этого профиля. */
+    val csqttConfig: CsqttConfig? = null,
 ) {
     /** Go поднимает локальный SOCKS5 (userspace WG) вместо Android GoBackend — верно и для socks, и для rawtun. */
     val isSocksMode: Boolean
-        get() = SettingsStore.normalizeConnectionMode(connectionMode) != SettingsStore.CONNECTION_MODE_VPN
+        get() = !isCsqttMode &&
+            SettingsStore.normalizeConnectionMode(connectionMode) != SettingsStore.CONNECTION_MODE_VPN
 
     /** rawtun: сырые IP-пакеты напрямую в go_client через TUN-fd, без WireGuard вообще (ни Android, ни userspace). */
     val isRawTunMode: Boolean
-        get() = SettingsStore.normalizeConnectionMode(connectionMode) == SettingsStore.CONNECTION_MODE_RAWTUN
+        get() = !isCsqttMode &&
+            SettingsStore.normalizeConnectionMode(connectionMode) == SettingsStore.CONNECTION_MODE_RAWTUN
+
+    /**
+     * csqtt: запуск Rust-движка libcsqtt.so (S3). Имеет приоритет над
+     * остальными режимами и никогда не запускает Go-процесс.
+     */
+    val isCsqttMode: Boolean
+        get() = SettingsStore.normalizeServerProtocol(serverProtocol) == SettingsStore.SERVER_PROTOCOL_CSQTT ||
+            SettingsStore.normalizeConnectionMode(connectionMode) == SettingsStore.CONNECTION_MODE_CSQTT
 
     val socksListenAddress: String
         get() = SettingsStore.socksListenAddress(socksPort)
+
+    /**
+     * Готовая конфигурация CSQTT: поля профиля используются как фолбэк,
+     * а явный [csqttConfig] имеет приоритет (S4 будет складывать туда всё).
+     */
+    fun resolvedCsqttConfig(): CsqttConfig {
+        val base = csqttConfig ?: CsqttConfig(
+            peerHost = PeerAddress.host(peer),
+            peerPort = PeerAddress.port(peer) ?: CsqttDefaults.DEFAULT_PEER_PORT,
+            password = connectionPassword,
+            vkHashes = vkHashes
+                .split(Regex("[,\\s\\n]+"))
+                .map { it.trim() }
+                .filter { it.isNotEmpty() }
+                .take(SettingsStore.MAX_VK_HASHES),
+            captchaMode = captchaMode,
+            workers = workersPerHash,
+            obfs = obfsMode,
+            turnTransport = turnTransport,
+        )
+        val host = base.peerHost.trim().ifEmpty { PeerAddress.host(peer) }
+        val port = if (base.peerPort in 1..65535) base.peerPort
+            else PeerAddress.port(peer) ?: CsqttDefaults.DEFAULT_PEER_PORT
+        val password = base.password.ifEmpty { connectionPassword }
+        val hashes = if (base.vkHashes.isNotEmpty()) {
+            base.vkHashes
+        } else {
+            vkHashes.split(Regex("[,\\s\\n]+")).map { it.trim() }.filter { it.isNotEmpty() }
+        }
+        val workers = if (base.workers > 0) base.workers else workersPerHash
+        return base.copy(
+            peerHost = host,
+            peerPort = port,
+            password = password,
+            vkHashes = hashes,
+            workers = workers,
+        ).normalized()
+    }
 }

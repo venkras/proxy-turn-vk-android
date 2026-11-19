@@ -132,6 +132,9 @@ class MainActivity : ComponentActivity() {
         // URI файла .qwdtt, ожидающего импорта
         val pendingFileUri = mutableStateOf<Uri?>(null)
 
+        // Ссылка csqtt:// из deep-link, ожидающая импорта
+        val pendingImportText = mutableStateOf<String?>(null)
+
     }
 
     override fun onNewIntent(intent: Intent) {
@@ -145,8 +148,13 @@ class MainActivity : ComponentActivity() {
             AppShortcuts.ACTION_START_TUNNEL -> startTunnelFromShortcut()
             AppShortcuts.ACTION_STOP_TUNNEL -> TunnelControl.stop(applicationContext)
             Intent.ACTION_VIEW -> {
+                val raw = intent.dataString
                 val uri = intent.data
-                if (uri != null) {
+                if (!raw.isNullOrBlank() && raw.startsWith("csqtt://", ignoreCase = true)) {
+                    // Ссылка CSQTT зашифрована (Base64URL, регистрозависима),
+                    // поэтому передаём исходную строку, а не Uri.
+                    pendingImportText.value = raw.trim()
+                } else if (uri != null) {
                     pendingFileUri.value = uri
                 }
             }
@@ -333,6 +341,13 @@ fun MainScreen(
     val pendingFileUri = MainActivity.pendingFileUri.value
     LaunchedEffect(pendingFileUri) {
         if (pendingFileUri != null) {
+            selectedTab = 2
+        }
+    }
+
+    val pendingImportText = MainActivity.pendingImportText.value
+    LaunchedEffect(pendingImportText) {
+        if (pendingImportText != null) {
             selectedTab = 2
         }
     }
@@ -529,7 +544,9 @@ fun MainScreen(
                             importFileUri = MainActivity.pendingFileUri.value,
                             onImportHandled = { MainActivity.pendingFileUri.value = null },
                             requestCreateProfile = requestCreateProfile,
-                            onCreateProfileHandled = { requestCreateProfile = false }
+                            onCreateProfileHandled = { requestCreateProfile = false },
+                            importText = pendingImportText,
+                            onImportTextHandled = { MainActivity.pendingImportText.value = null }
                         )
                         3 -> ExceptionsTab()
                         4 -> LogsTab()

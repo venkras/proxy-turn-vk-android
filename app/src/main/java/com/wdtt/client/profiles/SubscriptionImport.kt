@@ -1,5 +1,6 @@
 package com.wdtt.client
 
+import com.wdtt.client.csqtt.CsqttLinkParser
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.withContext
 import org.json.JSONArray
@@ -54,6 +55,16 @@ object SubscriptionImport {
     fun parsePayload(rawText: String): ParsedRemoteSubscription? {
         val trimmed = rawText.trim()
         if (trimmed.isEmpty()) return null
+
+        // Ссылка CSQTT шифрованная и не является JSON/Base64-конфигом qWDTT.
+        if (trimmed.startsWith("csqtt://", ignoreCase = true)) {
+            val link = CsqttLinkParser.parse(trimmed) ?: return null
+            val profile = link.toConnectionProfile()
+            return ParsedRemoteSubscription(
+                profiles = listOf(profile),
+                subscriptionName = profile.name,
+            )
+        }
 
         var jsonStr = trimmed
         if (!trimmed.startsWith("[") && !trimmed.startsWith("{") && !trimmed.startsWith("qwdtt:")) {
@@ -161,7 +172,22 @@ object SubscriptionImport {
             trafficMb = traffic.coerceAtLeast(0.0),
             groupId = "",
             useGlobalHashes = hashes.isBlank(),
-            diagKey = jsonObj.optString("diagKey", jsonObj.optString("dk", "")).trim()
+            diagKey = jsonObj.optString("diagKey", jsonObj.optString("dk", "")).trim(),
+            serverProtocol = SettingsStore.normalizeServerProtocol(
+                jsonObj.optString("serverProtocol", jsonObj.optString("protocol", "wdtt"))
+            ),
+            csqttObfs = jsonObj.optString("csqttObfs", "unified"),
+            csqttTransport = jsonObj.optString("csqttTransport", "udp"),
+            csqttSrtp = jsonObj.optString("csqttSrtp", "auto"),
+            csqttFingerprint = jsonObj.optString("csqttFingerprint", "chrome"),
+            csqttHashMode = jsonObj.optString("csqttHashMode", "manual"),
+            csqttAccessToken = jsonObj.optString("csqttAccessToken", ""),
+            csqttClientIds = jsonObj.optString("csqttClientIds", ""),
+            csqttCustomTurnIps = jsonObj.optString("csqttCustomTurnIps", ""),
+            csqttDomainRouting = jsonObj.optBoolean("csqttDomainRouting", false),
+            csqttExcludeRuZones = jsonObj.optBoolean("csqttExcludeRuZones", false),
+            csqttDirectDomains = jsonObj.optString("csqttDirectDomains", ""),
+            csqttDirectIps = jsonObj.optString("csqttDirectIps", ""),
         )
     }
 

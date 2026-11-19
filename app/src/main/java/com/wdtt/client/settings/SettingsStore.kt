@@ -10,6 +10,7 @@ import androidx.datastore.preferences.core.intPreferencesKey
 import androidx.datastore.preferences.core.longPreferencesKey
 import androidx.datastore.preferences.core.stringPreferencesKey
 import androidx.datastore.preferences.preferencesDataStore
+import com.wdtt.client.csqtt.CsqttDefaults
 import kotlinx.coroutines.CompletableDeferred
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
@@ -139,6 +140,22 @@ class SettingsStore(context: Context) {
         private val SORT_PROFILES_BY_PING = booleanPreferencesKey("sort_profiles_by_ping")
         /** vpn = Android VpnService; socks = локальный SOCKS5 без VPN. */
         private val CONNECTION_MODE = stringPreferencesKey("connection_mode")
+        /** wdtt = Go-клиент; csqtt = Rust-движок libcsqtt.so. */
+        private val SERVER_PROTOCOL = stringPreferencesKey("server_protocol")
+        // ═══ CSQTT: параметры движка (применяются из профиля) ═══
+        private val CSQTT_PEER_PORT = intPreferencesKey("csqtt_peer_port")
+        private val CSQTT_OBFS = stringPreferencesKey("csqtt_obfs")
+        private val CSQTT_TURN_TRANSPORT = stringPreferencesKey("csqtt_turn_transport")
+        private val CSQTT_SRTP_MODE = stringPreferencesKey("csqtt_srtp_mode")
+        private val CSQTT_FINGERPRINT = stringPreferencesKey("csqtt_fingerprint")
+        private val CSQTT_VK_HASH_MODE = stringPreferencesKey("csqtt_vk_hash_mode")
+        private val CSQTT_ACCESS_TOKEN_ENCRYPTED = stringPreferencesKey("csqtt_access_token_encrypted")
+        private val CSQTT_CLIENT_IDS = stringPreferencesKey("csqtt_client_ids")
+        private val CSQTT_CUSTOM_TURN_IPS = stringPreferencesKey("csqtt_custom_turn_ips")
+        private val CSQTT_DOMAIN_ROUTING = booleanPreferencesKey("csqtt_domain_routing")
+        private val CSQTT_EXCLUDE_RU_ZONES = booleanPreferencesKey("csqtt_exclude_ru_zones")
+        private val CSQTT_DIRECT_DOMAINS = stringPreferencesKey("csqtt_direct_domains")
+        private val CSQTT_DIRECT_IPS = stringPreferencesKey("csqtt_direct_ips")
         private val SOCKS_PORT = intPreferencesKey("socks_port")
         private val SOCKS_AUTH_ENABLED = booleanPreferencesKey("socks_auth_enabled")
         private val SOCKS_USERNAME = stringPreferencesKey("socks_username")
@@ -155,6 +172,13 @@ class SettingsStore(context: Context) {
         const val CONNECTION_MODE_SOCKS = "socks"
         /** rawtun = сырые IP-пакеты напрямую в go_client через TUN-fd, вообще без WireGuard. */
         const val CONNECTION_MODE_RAWTUN = "rawtun"
+        /** csqtt = Rust-движок libcsqtt.so + TUN-fd через abstract UDS. */
+        const val CONNECTION_MODE_CSQTT = "csqtt"
+
+        /** Протокол сервера: классический WDTT/Go-клиент. */
+        const val SERVER_PROTOCOL_WDTT = "wdtt"
+        /** Протокол сервера: CSQTT (TURN через VK-звонки, Rust-движок). */
+        const val SERVER_PROTOCOL_CSQTT = "csqtt"
 
         private val HAS_SEEN_WELCOME_DIALOG = booleanPreferencesKey("has_seen_welcome_dialog")
         private val LAST_SEEN_VERSION_CODE = intPreferencesKey("last_seen_version_code")
@@ -196,7 +220,17 @@ class SettingsStore(context: Context) {
             return when {
                 mode.equals(CONNECTION_MODE_SOCKS, ignoreCase = true) -> CONNECTION_MODE_SOCKS
                 mode.equals(CONNECTION_MODE_RAWTUN, ignoreCase = true) -> CONNECTION_MODE_RAWTUN
+                mode.equals(CONNECTION_MODE_CSQTT, ignoreCase = true) -> CONNECTION_MODE_CSQTT
                 else -> CONNECTION_MODE_VPN
+            }
+        }
+
+        /** Нормализует протокол сервера; всё неизвестное считается WDTT. */
+        fun normalizeServerProtocol(protocol: String?): String {
+            return if (protocol.equals(SERVER_PROTOCOL_CSQTT, ignoreCase = true)) {
+                SERVER_PROTOCOL_CSQTT
+            } else {
+                SERVER_PROTOCOL_WDTT
             }
         }
 
@@ -459,6 +493,39 @@ class SettingsStore(context: Context) {
     val connectionPipelineEnabled: Flow<Boolean> = dataStore.data.map { it[CONNECTION_PIPELINE_ENABLED] ?: true }
     val sortProfilesByPing: Flow<Boolean> = dataStore.data.map { it[SORT_PROFILES_BY_PING] ?: false }
     val connectionMode: Flow<String> = dataStore.data.map { normalizeConnectionMode(it[CONNECTION_MODE]) }
+    /** Протокол сервера: wdtt (по умолчанию) или csqtt. */
+    val serverProtocol: Flow<String> = dataStore.data.map { normalizeServerProtocol(it[SERVER_PROTOCOL]) }
+
+    // ═══ CSQTT: параметры движка ═══
+    val csqttPeerPort: Flow<Int> = dataStore.data.map {
+        (it[CSQTT_PEER_PORT] ?: CsqttDefaults.DEFAULT_PEER_PORT).takeIf { p -> p in 1..65535 }
+            ?: CsqttDefaults.DEFAULT_PEER_PORT
+    }
+    val csqttObfs: Flow<String> = dataStore.data.map {
+        CsqttDefaults.normalizeObfuscation(it[CSQTT_OBFS])
+    }
+    val csqttTurnTransport: Flow<String> = dataStore.data.map {
+        CsqttDefaults.normalizeTurnTransport(it[CSQTT_TURN_TRANSPORT])
+    }
+    val csqttSrtpMode: Flow<String> = dataStore.data.map {
+        CsqttDefaults.normalizeSrtpMode(it[CSQTT_SRTP_MODE])
+    }
+    val csqttFingerprint: Flow<String> = dataStore.data.map {
+        CsqttDefaults.normalizeFingerprint(it[CSQTT_FINGERPRINT])
+    }
+    val csqttVkHashMode: Flow<String> = dataStore.data.map {
+        CsqttDefaults.normalizeVkHashMode(it[CSQTT_VK_HASH_MODE])
+    }
+    val csqttAccessToken: Flow<String> = dataStore.data.map {
+        readSecret(it, CSQTT_ACCESS_TOKEN_ENCRYPTED, CSQTT_ACCESS_TOKEN_ENCRYPTED)
+    }
+    val csqttClientIds: Flow<String> = dataStore.data.map { it[CSQTT_CLIENT_IDS] ?: "" }
+    val csqttCustomTurnIps: Flow<String> = dataStore.data.map { it[CSQTT_CUSTOM_TURN_IPS] ?: "" }
+    val csqttDomainRouting: Flow<Boolean> = dataStore.data.map { it[CSQTT_DOMAIN_ROUTING] ?: false }
+    val csqttExcludeRuZones: Flow<Boolean> = dataStore.data.map { it[CSQTT_EXCLUDE_RU_ZONES] ?: false }
+    val csqttDirectDomains: Flow<String> = dataStore.data.map { it[CSQTT_DIRECT_DOMAINS] ?: "" }
+    val csqttDirectIps: Flow<String> = dataStore.data.map { it[CSQTT_DIRECT_IPS] ?: "" }
+
     val socksPort: Flow<Int> = dataStore.data.map { normalizeSocksPort(it[SOCKS_PORT] ?: DEFAULT_SOCKS_PORT) }
     val socksAuthEnabled: Flow<Boolean> = dataStore.data.map { it[SOCKS_AUTH_ENABLED] ?: false }
     val socksUsername: Flow<String> = dataStore.data.map { it[SOCKS_USERNAME] ?: "" }
@@ -483,6 +550,49 @@ class SettingsStore(context: Context) {
 
     suspend fun saveConnectionMode(mode: String) {
         dataStore.edit { prefs -> prefs[CONNECTION_MODE] = normalizeConnectionMode(mode) }
+    }
+
+    suspend fun saveServerProtocol(protocol: String) {
+        dataStore.edit { prefs -> prefs[SERVER_PROTOCOL] = normalizeServerProtocol(protocol) }
+    }
+
+    /** Сохраняет все параметры CSQTT, применяемые из профиля. */
+    suspend fun saveCsqtt(
+        peerPort: Int = CsqttDefaults.DEFAULT_PEER_PORT,
+        obfs: String = CsqttDefaults.OBFUSCATION_UNIFIED,
+        transport: String = CsqttDefaults.TURN_TRANSPORT_UDP,
+        srtpMode: String = CsqttDefaults.SRTP_MODE_AUTO,
+        fingerprint: String = CsqttDefaults.FINGERPRINT_CHROME,
+        vkHashMode: String = CsqttDefaults.VK_HASH_MODE_MANUAL,
+        accessToken: String = "",
+        clientIds: String = "",
+        customTurnIps: String = "",
+        domainRouting: Boolean = false,
+        excludeRuZones: Boolean = false,
+        directDomains: String = "",
+        directIps: String = "",
+    ) {
+        dataStore.edit { prefs ->
+            prefs[CSQTT_PEER_PORT] = peerPort.coerceIn(1, 65535)
+            prefs[CSQTT_OBFS] = CsqttDefaults.normalizeObfuscation(obfs)
+            prefs[CSQTT_TURN_TRANSPORT] = CsqttDefaults.normalizeTurnTransport(transport)
+            prefs[CSQTT_SRTP_MODE] = CsqttDefaults.normalizeSrtpMode(srtpMode)
+            prefs[CSQTT_FINGERPRINT] = CsqttDefaults.normalizeFingerprint(fingerprint)
+            prefs[CSQTT_VK_HASH_MODE] = CsqttDefaults.normalizeVkHashMode(vkHashMode)
+            prefs.putSecret(CSQTT_ACCESS_TOKEN_ENCRYPTED, CSQTT_ACCESS_TOKEN_ENCRYPTED, accessToken.trim())
+            prefs[CSQTT_CLIENT_IDS] = clientIds.trim()
+            prefs[CSQTT_CUSTOM_TURN_IPS] = customTurnIps.trim().trim(',')
+            prefs[CSQTT_DOMAIN_ROUTING] = domainRouting
+            prefs[CSQTT_EXCLUDE_RU_ZONES] = excludeRuZones
+            prefs[CSQTT_DIRECT_DOMAINS] = directDomains.trim().trim(',')
+            prefs[CSQTT_DIRECT_IPS] = directIps.trim().trim(',')
+        }
+    }
+
+    suspend fun saveCsqttPeerPort(port: Int) {
+        dataStore.edit { prefs ->
+            prefs[CSQTT_PEER_PORT] = port.coerceIn(1, 65535)
+        }
     }
 
     suspend fun saveSocksPort(port: Int) {

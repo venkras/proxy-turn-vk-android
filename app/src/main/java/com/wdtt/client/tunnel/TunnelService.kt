@@ -26,6 +26,8 @@ import kotlinx.coroutines.flow.first
 import kotlinx.coroutines.isActive
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.flow.collectLatest
+import com.wdtt.client.csqtt.CsqttConfig
+import com.wdtt.client.csqtt.CsqttDefaults
 
 private const val TUNNEL_NOTIFICATION_CHANNEL_ID = NotificationHelper.TUNNEL_CHANNEL_ID
 private const val TUNNEL_NOTIFICATION_ID = 1
@@ -87,6 +89,7 @@ class TunnelService : Service() {
                                 ?: store.connectionMode.first()
                         )
                         val isRawTun = connectionMode == SettingsStore.CONNECTION_MODE_RAWTUN
+                        val serverProtocol = store.serverProtocol.first()
                         val serverDtlsPort = if (manualPortsEnabled) store.serverDtlsPort.first() else 56000
                         // Raw и так всегда без DTLS (инвариант архитектуры, не опция) — если этот
                         // переключатель читать безусловно, сохранённое значение от классического
@@ -100,9 +103,18 @@ class TunnelService : Service() {
                             noDtlsEnabled -> serverDirectPort
                             else -> serverDtlsPort
                         }
-                        val peerWithPort = if (basePeer.isBlank()) basePeer
-                            else if (isRawTun || noDtlsEnabled) PeerAddress.withPort(basePeer, effectiveServerPort)
-                            else PeerAddress.ensurePort(basePeer, effectiveServerPort)
+                        val isCsqttProtocol =
+                            SettingsStore.normalizeServerProtocol(serverProtocol) == SettingsStore.SERVER_PROTOCOL_CSQTT ||
+                                connectionMode == SettingsStore.CONNECTION_MODE_CSQTT
+                        val peerWithPort = when {
+                            basePeer.isBlank() -> basePeer
+                            // CSQTT-сервер слушает свой порт (по умолчанию 46000).
+                            // Порт из intent может быть DTLS-портом формы быстрого
+                            // подключения, поэтому здесь он заменяется, а не сохраняется.
+                            isCsqttProtocol -> PeerAddress.withPort(basePeer, store.csqttPeerPort.first())
+                            isRawTun || noDtlsEnabled -> PeerAddress.withPort(basePeer, effectiveServerPort)
+                            else -> PeerAddress.ensurePort(basePeer, effectiveServerPort)
+                        }
                         val vkAnonPath = SettingsStore.normalizeVkAnonPath(
                             intent.getStringExtra("vk_anon_path")?.takeIf { it.isNotEmpty() }
                                 ?: store.vkAnonPath.first()
@@ -127,16 +139,40 @@ class TunnelService : Service() {
                         val socksPassword = intent.getStringExtra("socks_password")
                             ?: store.socksPassword.first()
                         
+                        val vkHashesValue =
+                            intent.getStringExtra("vk_hashes")?.takeIf { it.isNotEmpty() } ?: store.vkHashes.first()
+                        val connectionPasswordValue =
+                            intent.getStringExtra("connection_password")?.takeIf { it.isNotEmpty() }
+                                ?: store.connectionPassword.first()
+                        val workersValue =
+                            intent.getIntExtra("workers_per_hash", 0).takeIf { it > 0 } ?: store.workersPerHash.first()
+                        val captchaModeValue = sanitizeCaptchaMode(
+                            intent.getStringExtra("captcha_mode")?.takeIf { it.isNotEmpty() }
+                                ?: store.captchaMode.first()
+                        )
+                        val csqttConfigValue = if (isCsqttProtocol) {
+                            csqttConfigFromStore(
+                                store = store,
+                                basePeer = peerWithPort,
+                                vkHashes = vkHashesValue,
+                                password = connectionPasswordValue,
+                                workers = workersValue,
+                                captchaMode = captchaModeValue,
+                            )
+                        } else {
+                            null
+                        }
+
                         val params = TunnelParams(
                             peer = peerWithPort,
-                            vkHashes = intent.getStringExtra("vk_hashes")?.takeIf { it.isNotEmpty() } ?: store.vkHashes.first(),
+                            vkHashes = vkHashesValue,
                             secondaryVkHash = intent.getStringExtra("secondary_vk_hash")?.takeIf { it.isNotEmpty() } ?: store.secondaryVkHash.first(),
-                            workersPerHash = intent.getIntExtra("workers_per_hash", 0).takeIf { it > 0 } ?: store.workersPerHash.first(),
+                            workersPerHash = workersValue,
                             port = intent.getIntExtra("port", 0).takeIf { it > 0 } ?: store.listenPort.first(),
                             sni = intent.getStringExtra("sni")?.takeIf { it.isNotEmpty() } ?: store.sni.first(),
-                            connectionPassword = intent.getStringExtra("connection_password")?.takeIf { it.isNotEmpty() } ?: store.connectionPassword.first(),
+                            connectionPassword = connectionPasswordValue,
                             protocol = intent.getStringExtra("protocol")?.takeIf { it.isNotEmpty() } ?: store.protocol.first(),
-                            captchaMode = sanitizeCaptchaMode(intent.getStringExtra("captcha_mode")?.takeIf { it.isNotEmpty() } ?: store.captchaMode.first()),
+                            captchaMode = captchaModeValue,
                             captchaSolveMethod = intent.getStringExtra("captcha_solve_method")?.takeIf { it.isNotEmpty() } ?: store.captchaSolveMethod.first(),
                             vkAuthMode = intent.getStringExtra("vk_auth_mode")?.takeIf { it.isNotEmpty() } ?: store.vkAuthMode.first(),
                             vkAnonPath = vkAnonPath,
@@ -152,7 +188,13 @@ class TunnelService : Service() {
                             turnHosts = store.turnHosts.first(),
                             detailedLogs = store.detailedLogs.first(),
                             diagKey = store.diagKey.first(),
-                            diagPorts = diagPortsArg(basePeer, serverDtlsPort, serverDirectPort, serverRawPort)
+                            diagPorts = diagPortsArg(basePeer, serverDtlsPort, serverDirectPort, serverRawPort),
+                            serverProtocol = if (isCsqttProtocol) {
+                                SettingsStore.SERVER_PROTOCOL_CSQTT
+                            } else {
+                                serverProtocol
+                            },
+                            csqttConfig = csqttConfigValue,
                         )
                         launch(Dispatchers.Main) {
                             startTunnel(
@@ -207,23 +249,50 @@ class TunnelService : Service() {
                 val noDtlsEnabled = !isRawTunRestore && store.noDtlsEnabled.first()
                 val serverDirectPort = if (manualPortsEnabled) store.serverDirectPort.first() else 56002
                 val serverRawPort = if (manualPortsEnabled) store.serverRawPort.first() else 56003
+                val serverProtocolRestore = store.serverProtocol.first()
+                val isCsqttRestore =
+                    SettingsStore.normalizeServerProtocol(serverProtocolRestore) ==
+                        SettingsStore.SERVER_PROTOCOL_CSQTT ||
+                        connectionModeRestore == SettingsStore.CONNECTION_MODE_CSQTT
                 val effectiveServerPort = when {
                     isRawTunRestore -> serverRawPort
                     noDtlsEnabled -> serverDirectPort
                     else -> serverDtlsPort
                 }
-                val peerWithPort = if (basePeer.isBlank()) basePeer
-                    else if (isRawTunRestore || noDtlsEnabled) PeerAddress.withPort(basePeer, effectiveServerPort)
-                    else PeerAddress.ensurePort(basePeer, effectiveServerPort)
+                val peerWithPort = when {
+                    basePeer.isBlank() -> basePeer
+                    // CSQTT-сервер слушает свой порт (по умолчанию 46000), а не
+                    // DTLS/direct/raw-порты Go-клиента. Порт из сохранённого peer
+                    // тоже не используем: источник истины — csqttPeerPort.
+                    isCsqttRestore -> PeerAddress.withPort(basePeer, store.csqttPeerPort.first())
+                    isRawTunRestore || noDtlsEnabled -> PeerAddress.withPort(basePeer, effectiveServerPort)
+                    else -> PeerAddress.ensurePort(basePeer, effectiveServerPort)
+                }
+                val vkHashesRestore = store.vkHashes.first()
+                val connectionPasswordRestore = store.connectionPassword.first()
+                val workersRestore = store.workersPerHash.first()
+                val captchaModeRestore = sanitizeCaptchaMode(store.captchaMode.first())
+                val csqttConfigRestore = if (isCsqttRestore) {
+                    csqttConfigFromStore(
+                        store = store,
+                        basePeer = peerWithPort,
+                        vkHashes = vkHashesRestore,
+                        password = connectionPasswordRestore,
+                        workers = workersRestore,
+                        captchaMode = captchaModeRestore,
+                    )
+                } else {
+                    null
+                }
                 val params = TunnelParams(
                     peer = peerWithPort,
-                    vkHashes = store.vkHashes.first(),
+                    vkHashes = vkHashesRestore,
                     secondaryVkHash = store.secondaryVkHash.first(),
-                    workersPerHash = store.workersPerHash.first(),
+                    workersPerHash = workersRestore,
                     port = store.listenPort.first(),
                     sni = store.sni.first(),
-                    connectionPassword = store.connectionPassword.first(),
-                    captchaMode = sanitizeCaptchaMode(store.captchaMode.first()),
+                    connectionPassword = connectionPasswordRestore,
+                    captchaMode = captchaModeRestore,
                     captchaSolveMethod = store.captchaSolveMethod.first(),
                     vkAuthMode = store.vkAuthMode.first(),
                     vkAnonPath = SettingsStore.normalizeVkAnonPath(store.vkAnonPath.first()),
@@ -239,9 +308,15 @@ class TunnelService : Service() {
                     turnHosts = store.turnHosts.first(),
                     detailedLogs = store.detailedLogs.first(),
                     diagKey = store.diagKey.first(),
-                    diagPorts = diagPortsArg(basePeer, serverDtlsPort, serverDirectPort, serverRawPort)
+                    diagPorts = diagPortsArg(basePeer, serverDtlsPort, serverDirectPort, serverRawPort),
+                    serverProtocol = if (isCsqttRestore) {
+                        SettingsStore.SERVER_PROTOCOL_CSQTT
+                    } else {
+                        serverProtocolRestore
+                    },
+                    csqttConfig = csqttConfigRestore,
                 )
-                if (params.peer.isNotEmpty() && params.vkHashes.isNotEmpty()) {
+                if (params.peer.isNotEmpty() && (params.vkHashes.isNotEmpty() || params.isCsqttMode)) {
                     launch(Dispatchers.Main) {
                         startTunnel(params)
                     }
@@ -285,9 +360,14 @@ class TunnelService : Service() {
      */
     private fun switchMode(rawMode: String?) {
         val mode = SettingsStore.normalizeConnectionMode(rawMode ?: return)
+        // CSQTT — принципиально другой транспорт (Rust-движок), не ещё один
+        // Go-режим: переключаться «на лету» между ним и WG/Raw нельзя, нужен
+        // обычный стоп + повторное подключение.
+        if (mode == SettingsStore.CONNECTION_MODE_CSQTT) return
         if (mode == SettingsStore.CONNECTION_MODE_SOCKS) return
         val current = TunnelManager.currentConnectionMode()
         if (current == null || current == SettingsStore.CONNECTION_MODE_SOCKS) return
+        if (current == SettingsStore.CONNECTION_MODE_CSQTT) return
         if (current == mode) return
         val appContext = applicationContext
         TunnelManager.scope.launch {
@@ -318,6 +398,54 @@ class TunnelService : Service() {
         QuickToggleTileService.requestTileUpdate(applicationContext)
         AppShortcuts.refreshAsync(applicationContext)
         stopSelf()
+    }
+
+    /**
+     * Собирает полную конфигурацию CSQTT из сохранённых параметров профиля.
+     * Пароль/хеши/воркеры уже вычислены вызывающим кодом (intent или store).
+     */
+    private suspend fun csqttConfigFromStore(
+        store: SettingsStore,
+        basePeer: String,
+        vkHashes: String,
+        password: String,
+        workers: Int,
+        captchaMode: String,
+    ): CsqttConfig {
+        val hashes = vkHashes
+            .split(Regex("[,\\s\\n]+"))
+            .map { it.trim() }
+            .filter { it.isNotEmpty() }
+            .take(SettingsStore.MAX_VK_HASHES)
+        val token = store.csqttAccessToken.first()
+        val hashMode = when {
+            token.isNotBlank() && hashes.isEmpty() -> CsqttDefaults.VK_HASH_MODE_AUTO_JS
+            hashes.isEmpty() -> store.csqttVkHashMode.first()
+            else -> CsqttDefaults.VK_HASH_MODE_MANUAL
+        }
+        return CsqttConfig(
+            peerHost = PeerAddress.host(basePeer),
+            peerPort = PeerAddress.port(basePeer) ?: store.csqttPeerPort.first(),
+            password = password,
+            vkHashes = hashes,
+            vkAccessToken = token,
+            vkHashMode = hashMode,
+            captchaMode = captchaMode,
+            workers = workers,
+            obfs = store.csqttObfs.first(),
+            turnTransport = store.csqttTurnTransport.first(),
+            srtpMode = store.csqttSrtpMode.first(),
+            fingerprint = store.csqttFingerprint.first(),
+            clientIds = store.csqttClientIds.first()
+                .split(Regex("[,\\s\\n]+"))
+                .map { it.trim() }
+                .filter { it.isNotEmpty() },
+            customTurnIps = store.csqttCustomTurnIps.first(),
+            domainRouting = store.csqttDomainRouting.first(),
+            excludeRuZones = store.csqttExcludeRuZones.first(),
+            directDomains = store.csqttDirectDomains.first(),
+            directIps = store.csqttDirectIps.first(),
+        )
     }
 
     /**
@@ -691,7 +819,8 @@ class TunnelService : Service() {
                         stopSelf()
                         break
                     }
-                    if (TunnelManager.running.value && !isTunnelPaused && !TunnelManager.isSocksModeActive()) {
+                    if (TunnelManager.running.value && !isTunnelPaused && !TunnelManager.isSocksModeActive() &&
+                        !TunnelManager.isCsqttModeActive()) {
                         val helper = WireGuardHelper(applicationContext)
                         when (helper.watchdogState()) {
                             WireGuardHelper.WatchdogState.UP -> wasEverUp = true

@@ -61,6 +61,7 @@ import androidx.compose.ui.window.DialogProperties
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import com.wdtt.client.PeerAddress
 import com.wdtt.client.BypassRoutes
+import com.wdtt.client.csqtt.CsqttEngine
 import com.wdtt.client.SettingsStore
 import com.wdtt.client.TunnelManager
 import com.wdtt.client.TunnelService
@@ -1269,10 +1270,11 @@ fun SettingsTabContent(
                             fontWeight = FontWeight.Medium
                         )
                         Text(
-                            "Оба варианта — полноценный VPN (весь трафик через туннель), отличается только " +
+                            "WG и Raw — полноценный VPN (весь трафик через туннель), отличается только " +
                                 "транспортный протокол. WireGuard — основной, проверенный. Raw — без " +
                                 "WireGuard вообще, эксперимент, нужен сервер с -listen-raw. SOCKS5 — без " +
-                                "VPN-разрешения, прокси вручную.",
+                                "VPN-разрешения, прокси вручную. CSQTT — Rust-движок libcsqtt.so (TURN через " +
+                                "VK-звонки), требует профиль CSQTT.",
                             style = MaterialTheme.typography.bodySmall,
                             color = MaterialTheme.colorScheme.onSurfaceVariant
                         )
@@ -1284,7 +1286,10 @@ fun SettingsTabContent(
                                 selected = connectionMode == SettingsStore.CONNECTION_MODE_VPN,
                                 onClick = {
                                     if (!tunnelRunning) {
-                                        scope.launch { settingsStore.saveConnectionMode(SettingsStore.CONNECTION_MODE_VPN) }
+                                        scope.launch {
+                                            settingsStore.saveConnectionMode(SettingsStore.CONNECTION_MODE_VPN)
+                                            settingsStore.saveServerProtocol(SettingsStore.SERVER_PROTOCOL_WDTT)
+                                        }
                                     }
                                 },
                                 label = { Text("WG") },
@@ -1295,7 +1300,10 @@ fun SettingsTabContent(
                                 selected = connectionMode == SettingsStore.CONNECTION_MODE_RAWTUN,
                                 onClick = {
                                     if (!tunnelRunning) {
-                                        scope.launch { settingsStore.saveConnectionMode(SettingsStore.CONNECTION_MODE_RAWTUN) }
+                                        scope.launch {
+                                            settingsStore.saveConnectionMode(SettingsStore.CONNECTION_MODE_RAWTUN)
+                                            settingsStore.saveServerProtocol(SettingsStore.SERVER_PROTOCOL_WDTT)
+                                        }
                                     }
                                 },
                                 label = { Text("Raw") },
@@ -1306,12 +1314,47 @@ fun SettingsTabContent(
                                 selected = connectionMode == SettingsStore.CONNECTION_MODE_SOCKS,
                                 onClick = {
                                     if (!tunnelRunning) {
-                                        scope.launch { settingsStore.saveConnectionMode(SettingsStore.CONNECTION_MODE_SOCKS) }
+                                        scope.launch {
+                                            settingsStore.saveConnectionMode(SettingsStore.CONNECTION_MODE_SOCKS)
+                                            settingsStore.saveServerProtocol(SettingsStore.SERVER_PROTOCOL_WDTT)
+                                        }
                                     }
                                 },
                                 label = { Text("SOCKS5") },
                                 enabled = !tunnelRunning,
                                 modifier = Modifier.weight(1f)
+                            )
+                        }
+                        FilterChip(
+                            selected = connectionMode == SettingsStore.CONNECTION_MODE_CSQTT,
+                            onClick = {
+                                if (!tunnelRunning) {
+                                    if (!CsqttEngine.isBundled(context)) {
+                                        Toast.makeText(
+                                            context,
+                                            "CSQTT недоступен: в этой сборке нет libcsqtt.so. " +
+                                                "Нужен APK, собранный с -PcsqttEngine=true.",
+                                            Toast.LENGTH_LONG,
+                                        ).show()
+                                    } else {
+                                        scope.launch {
+                                            settingsStore.saveConnectionMode(SettingsStore.CONNECTION_MODE_CSQTT)
+                                            settingsStore.saveServerProtocol(SettingsStore.SERVER_PROTOCOL_CSQTT)
+                                        }
+                                    }
+                                }
+                            },
+                            label = { Text("CSQTT (экспериментально)") },
+                            enabled = !tunnelRunning,
+                            modifier = Modifier.fillMaxWidth()
+                        )
+                        if (connectionMode == SettingsStore.CONNECTION_MODE_CSQTT) {
+                            Text(
+                                "Нужен профиль CSQTT: сервер, порт UDP 46000, пароль и VK-хеши " +
+                                    "или токен. Параметры профиля задаются в редакторе профиля. " +
+                                    "Если libcsqtt.so нет в сборке, подключение не запустится.",
+                                style = MaterialTheme.typography.labelSmall,
+                                color = MaterialTheme.colorScheme.error
                             )
                         }
                         if (connectionMode == SettingsStore.CONNECTION_MODE_RAWTUN) {
@@ -1652,6 +1695,10 @@ fun SettingsTabContent(
                             style = MaterialTheme.typography.bodySmall,
                             color = MaterialTheme.colorScheme.onSurfaceVariant
                         )
+
+                        // Лицензия встроенного движка CSQTT (PolyForm Noncommercial).
+                        CsqttEngineInfoSection(context = context)
+                        CsqttLicenseSection(context = context)
 
                         OutlinedButton(
                             onClick = {
@@ -3656,4 +3703,141 @@ private fun GoDnsDropdownItem(
         onClick = onClick,
         contentPadding = PaddingValues(horizontal = 16.dp, vertical = 10.dp)
     )
+}
+
+/**
+ * Версия, commit и SHA-256 встроенного Rust-движка CSQTT.
+ *
+ * `csqtt-engine.json` создаёт scripts/csqtt-engine-provenance.sh при сборке с
+ * `-PcsqttEngine=true`. В обычной сборке файла нет — показываем только статус.
+ */
+@Composable
+private fun CsqttEngineInfoSection(context: Context) {
+    val bundled = remember(context) { CsqttEngine.isBundled(context) }
+    val info = remember(context) {
+        runCatching {
+            val raw = context.assets.open("csqtt-engine.json")
+                .bufferedReader(Charsets.UTF_8)
+                .use { it.readText() }
+            org.json.JSONObject(raw)
+        }.getOrNull()
+    }
+
+    Column(verticalArrangement = Arrangement.spacedBy(2.dp)) {
+        Text(
+            "Движок CSQTT",
+            style = MaterialTheme.typography.bodyMedium,
+            fontWeight = FontWeight.Medium
+        )
+        Text(
+            if (bundled) {
+                "libcsqtt.so включён в APK"
+            } else {
+                "libcsqtt.so не входит в эту сборку: подключение CSQTT недоступно " +
+                    "(нужна сборка с -PcsqttEngine=true)."
+            },
+            style = MaterialTheme.typography.bodySmall,
+            color = if (bundled) {
+                MaterialTheme.colorScheme.onSurfaceVariant
+            } else {
+                MaterialTheme.colorScheme.error
+            }
+        )
+        if (info != null) {
+            val version = info.optString("version", "")
+            val commit = info.optString("commit", "")
+            val license = info.optString("license", "")
+            val builtAt = info.optString("builtAtUtc", "")
+            if (version.isNotBlank()) {
+                Text("Версия: $version", style = MaterialTheme.typography.bodySmall)
+            }
+            if (commit.isNotBlank()) {
+                Text(
+                    "Commit: ${commit.take(12)}",
+                    style = MaterialTheme.typography.bodySmall,
+                    fontFamily = FontFamily.Monospace
+                )
+            }
+            if (license.isNotBlank()) {
+                Text("Лицензия: $license", style = MaterialTheme.typography.bodySmall)
+            }
+            if (builtAt.isNotBlank()) {
+                Text("Собран: $builtAt", style = MaterialTheme.typography.bodySmall)
+            }
+            val abis = info.optJSONObject("abis")
+            if (abis != null) {
+                val keys = abis.keys()
+                while (keys.hasNext()) {
+                    val abi = keys.next()
+                    val sha = abis.optJSONObject(abi)?.optString("sha256").orEmpty()
+                    if (sha.isNotBlank()) {
+                        Text(
+                            "$abi: sha256 $sha",
+                            style = MaterialTheme.typography.bodySmall,
+                            color = MaterialTheme.colorScheme.onSurfaceVariant,
+                            fontFamily = FontFamily.Monospace
+                        )
+                    }
+                }
+            }
+        }
+    }
+}
+
+/**
+ * Показывает лицензию встроенного Rust-движка CSQTT (`assets/licenses/CSQTT-LICENSE`).
+ * Текст читается по нажатию, чтобы не грузить ассет при каждом открытии настроек.
+ */
+@Composable
+private fun CsqttLicenseSection(context: Context) {
+    var showLicense by remember { mutableStateOf(false) }
+    var licenseText by remember { mutableStateOf<String?>(null) }
+
+    LaunchedEffect(showLicense) {
+        if (showLicense && licenseText == null) {
+            licenseText = runCatching {
+                context.assets.open("licenses/CSQTT-LICENSE")
+                    .bufferedReader(Charsets.UTF_8)
+                    .use { it.readText() }
+            }.getOrNull()
+        }
+    }
+
+    OutlinedButton(
+        onClick = { showLicense = true },
+        modifier = Modifier.fillMaxWidth(),
+        shape = RoundedCornerShape(12.dp),
+        contentPadding = PaddingValues(horizontal = 16.dp, vertical = 10.dp),
+    ) {
+        Icon(
+            imageVector = Icons.Filled.Info,
+            contentDescription = null,
+            modifier = Modifier.size(18.dp),
+        )
+        Spacer(modifier = Modifier.width(8.dp))
+        Text("Лицензия CSQTT (libcsqtt.so)", style = MaterialTheme.typography.labelLarge)
+    }
+
+    if (showLicense) {
+        AlertDialog(
+            onDismissRequest = { showLicense = false },
+            title = { Text("CSQTT / libcsqtt.so") },
+            text = {
+                Box(
+                    modifier = Modifier
+                        .heightIn(max = 360.dp)
+                        .verticalScroll(rememberScrollState())
+                ) {
+                    Text(
+                        text = licenseText ?: "Загрузка… Если текст не появился, лицензия недоступна в этой сборке.",
+                        style = MaterialTheme.typography.bodySmall,
+                        fontFamily = FontFamily.Monospace,
+                    )
+                }
+            },
+            confirmButton = {
+                TextButton(onClick = { showLicense = false }) { Text("Закрыть") }
+            }
+        )
+    }
 }

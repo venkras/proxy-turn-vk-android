@@ -47,6 +47,8 @@ import androidx.compose.ui.text.PlatformTextStyle
 import com.wdtt.client.PeerAddress
 import com.wdtt.client.ConnectionProfile
 import com.wdtt.client.ProfilesStore
+import com.wdtt.client.csqtt.CsqttDefaults
+import com.wdtt.client.csqtt.CsqttEngine
 import android.widget.Toast
 import org.json.JSONObject
 import java.net.HttpURLConnection
@@ -122,7 +124,9 @@ fun ProfilesTab(
     importFileUri: android.net.Uri? = null,
     onImportHandled: () -> Unit = {},
     requestCreateProfile: Boolean = false,
-    onCreateProfileHandled: () -> Unit = {}
+    onCreateProfileHandled: () -> Unit = {},
+    importText: String? = null,
+    onImportTextHandled: () -> Unit = {}
 ) {
     val context = LocalContext.current
     val scope = rememberCoroutineScope()
@@ -209,6 +213,21 @@ fun ProfilesTab(
                             obj.put("workersPerHash", p.workersPerHash)
                             obj.put("listenPort", p.listenPort)
                             obj.put("password", p.password)
+                            obj.put("serverProtocol", SettingsStore.normalizeServerProtocol(p.serverProtocol))
+                            if (p.isCsqtt) {
+                                obj.put("csqttObfs", p.csqttObfs)
+                                obj.put("csqttTransport", p.csqttTransport)
+                                obj.put("csqttSrtp", p.csqttSrtp)
+                                obj.put("csqttFingerprint", p.csqttFingerprint)
+                                obj.put("csqttHashMode", p.csqttHashMode)
+                                if (p.csqttAccessToken.isNotBlank()) obj.put("csqttAccessToken", p.csqttAccessToken)
+                                if (p.csqttClientIds.isNotBlank()) obj.put("csqttClientIds", p.csqttClientIds)
+                                if (p.csqttCustomTurnIps.isNotBlank()) obj.put("csqttCustomTurnIps", p.csqttCustomTurnIps)
+                                obj.put("csqttDomainRouting", p.csqttDomainRouting)
+                                obj.put("csqttExcludeRuZones", p.csqttExcludeRuZones)
+                                if (p.csqttDirectDomains.isNotBlank()) obj.put("csqttDirectDomains", p.csqttDirectDomains)
+                                if (p.csqttDirectIps.isNotBlank()) obj.put("csqttDirectIps", p.csqttDirectIps)
+                            }
                             val groupName = groups.find { it.id == p.groupId }?.name ?: ""
                             obj.put("groupName", groupName)
                             jsonArray.put(obj)
@@ -246,6 +265,21 @@ fun ProfilesTab(
                             obj.put("workersPerHash", p.workersPerHash)
                             obj.put("listenPort", p.listenPort)
                             obj.put("password", p.password)
+                            obj.put("serverProtocol", SettingsStore.normalizeServerProtocol(p.serverProtocol))
+                            if (p.isCsqtt) {
+                                obj.put("csqttObfs", p.csqttObfs)
+                                obj.put("csqttTransport", p.csqttTransport)
+                                obj.put("csqttSrtp", p.csqttSrtp)
+                                obj.put("csqttFingerprint", p.csqttFingerprint)
+                                obj.put("csqttHashMode", p.csqttHashMode)
+                                if (p.csqttAccessToken.isNotBlank()) obj.put("csqttAccessToken", p.csqttAccessToken)
+                                if (p.csqttClientIds.isNotBlank()) obj.put("csqttClientIds", p.csqttClientIds)
+                                if (p.csqttCustomTurnIps.isNotBlank()) obj.put("csqttCustomTurnIps", p.csqttCustomTurnIps)
+                                obj.put("csqttDomainRouting", p.csqttDomainRouting)
+                                obj.put("csqttExcludeRuZones", p.csqttExcludeRuZones)
+                                if (p.csqttDirectDomains.isNotBlank()) obj.put("csqttDirectDomains", p.csqttDirectDomains)
+                                if (p.csqttDirectIps.isNotBlank()) obj.put("csqttDirectIps", p.csqttDirectIps)
+                            }
                             jsonArray.put(obj)
                         }
                         context.contentResolver.openOutputStream(uri)?.use { os ->
@@ -305,7 +339,39 @@ fun ProfilesTab(
                                                 ""
                                             }
                                             
-                                            profilesStore.createProfile(name, peer, vkHashes, workers, port, pass, targetGroupId)
+                                            val protocol = SettingsStore.normalizeServerProtocol(
+                                                obj.optString("serverProtocol", "wdtt")
+                                            )
+                                            if (protocol == SettingsStore.SERVER_PROTOCOL_CSQTT) {
+                                                profilesStore.saveProfile(
+                                                    ConnectionProfile(
+                                                        id = UUID.randomUUID().toString(),
+                                                        name = name,
+                                                        peer = peer,
+                                                        vkHashes = vkHashes,
+                                                        workersPerHash = workers,
+                                                        listenPort = port,
+                                                        password = pass,
+                                                        groupId = targetGroupId,
+                                                        useGlobalHashes = false,
+                                                        serverProtocol = protocol,
+                                                        csqttObfs = obj.optString("csqttObfs", "unified"),
+                                                        csqttTransport = obj.optString("csqttTransport", "udp"),
+                                                        csqttSrtp = obj.optString("csqttSrtp", "auto"),
+                                                        csqttFingerprint = obj.optString("csqttFingerprint", "chrome"),
+                                                        csqttHashMode = obj.optString("csqttHashMode", "manual"),
+                                                        csqttAccessToken = obj.optString("csqttAccessToken", ""),
+                                                        csqttClientIds = obj.optString("csqttClientIds", ""),
+                                                        csqttCustomTurnIps = obj.optString("csqttCustomTurnIps", ""),
+                                                        csqttDomainRouting = obj.optBoolean("csqttDomainRouting", false),
+                                                        csqttExcludeRuZones = obj.optBoolean("csqttExcludeRuZones", false),
+                                                        csqttDirectDomains = obj.optString("csqttDirectDomains", ""),
+                                                        csqttDirectIps = obj.optString("csqttDirectIps", ""),
+                                                    )
+                                                )
+                                            } else {
+                                                profilesStore.createProfile(name, peer, vkHashes, workers, port, pass, targetGroupId)
+                                            }
                                             importedCount++
                                         }
                                         break
@@ -350,6 +416,21 @@ fun ProfilesTab(
     var portInput by rememberSaveable { mutableStateOf("9000") }
     var passwordInput by rememberSaveable { mutableStateOf("") }
     var useGlobalHashesInput by rememberSaveable { mutableStateOf(true) }
+    val csqttBundled = remember(context) { CsqttEngine.isBundled(context) }
+    var serverProtocolInput by rememberSaveable { mutableStateOf(SettingsStore.SERVER_PROTOCOL_WDTT) }
+    var csqttPortInput by rememberSaveable { mutableStateOf(CsqttDefaults.DEFAULT_PEER_PORT.toString()) }
+    var csqttObfsInput by rememberSaveable { mutableStateOf(CsqttDefaults.OBFUSCATION_UNIFIED) }
+    var csqttTransportInput by rememberSaveable { mutableStateOf(CsqttDefaults.TURN_TRANSPORT_UDP) }
+    var csqttSrtpInput by rememberSaveable { mutableStateOf(CsqttDefaults.SRTP_MODE_AUTO) }
+    var csqttHashModeInput by rememberSaveable { mutableStateOf(CsqttDefaults.VK_HASH_MODE_MANUAL) }
+    var csqttTokenInput by rememberSaveable { mutableStateOf("") }
+    var csqttFingerprintInput by rememberSaveable { mutableStateOf(CsqttDefaults.FINGERPRINT_CHROME) }
+    var csqttClientIdsInput by rememberSaveable { mutableStateOf("") }
+    var csqttTurnIpsInput by rememberSaveable { mutableStateOf("") }
+    var csqttDomainRoutingInput by rememberSaveable { mutableStateOf(false) }
+    var csqttExcludeRuInput by rememberSaveable { mutableStateOf(false) }
+    var csqttDirectDomainsInput by rememberSaveable { mutableStateOf("") }
+    var csqttDirectIpsInput by rememberSaveable { mutableStateOf("") }
     var showGroupManagement by rememberSaveable { mutableStateOf(false) }
     var showAddSubscriptionDialog by rememberSaveable { mutableStateOf(false) }
     var savingSubscription by remember { mutableStateOf(false) }
@@ -384,6 +465,67 @@ fun ProfilesTab(
             if (selectedFilterGroup == null) true
             else it.groupId == selectedFilterGroup
         }
+    }
+
+    /**
+     * Сохраняет импортированный CSQTT-профиль и сразу применяет его к
+     * настройкам подключения. Совпадающий сервер (host) обновляется на месте,
+     * чтобы повторный импорт ссылки не плодил дубликаты.
+     */
+    fun applyImportedProfile(profile: ConnectionProfile) {
+        if (!csqttBundled) {
+            Toast.makeText(
+                context,
+                "Профиль CSQTT сохранён, но движок libcsqtt.so отсутствует в этой сборке — " +
+                    "подключение не запустится.",
+                Toast.LENGTH_LONG,
+            ).show()
+        }
+        val existing = if (profile.isCsqtt) {
+            profiles.firstOrNull {
+                it.isCsqtt && PeerAddress.host(it.peer).equals(PeerAddress.host(profile.peer), ignoreCase = true)
+            }
+        } else {
+            null
+        }
+        val target = profile.copy(
+            id = existing?.id ?: profile.id,
+            name = existing?.name?.takeIf { it.isNotBlank() } ?: profile.name,
+            groupId = existing?.groupId ?: profile.groupId,
+            trafficMb = existing?.trafficMb ?: profile.trafficMb,
+        )
+        scope.launch {
+            profilesStore.saveProfile(target)
+            if (target.isCsqtt) {
+                profilesStore.applyProfile(context, target.id)
+                onProfileApplied()
+            }
+        }
+    }
+
+    LaunchedEffect(importText) {
+        val raw = importText ?: return@LaunchedEffect
+        try {
+            val parsed = parseMultipleConfigs(raw)
+            if (parsed != null) {
+                if (parsed.profiles.size == 1) {
+                    val profile = parsed.profiles.first()
+                    if (profile.isCsqtt) {
+                        applyImportedProfile(profile)
+                        Toast.makeText(context, "Профиль CSQTT сохранён и применён", Toast.LENGTH_SHORT).show()
+                    } else {
+                        scannedProfile = profile
+                    }
+                } else {
+                    scannedMultipleProfiles = parsed
+                }
+            } else {
+                Toast.makeText(context, "Неверный формат ссылки", Toast.LENGTH_LONG).show()
+            }
+        } catch (e: Exception) {
+            Toast.makeText(context, "Ошибка импорта: ${e.message}", Toast.LENGTH_LONG).show()
+        }
+        onImportTextHandled()
     }
 
     val density = LocalDensity.current
@@ -432,7 +574,12 @@ fun ProfilesTab(
             val parsed = parseMultipleConfigs(text)
             if (parsed != null) {
                 if (parsed.profiles.size == 1) {
-                    scannedProfile = parsed.profiles.first()
+                    val single = parsed.profiles.first()
+                    if (single.isCsqtt) {
+                        applyImportedProfile(single)
+                    } else {
+                        scannedProfile = single
+                    }
                 } else {
                     scannedMultipleProfiles = parsed
                 }
@@ -467,63 +614,132 @@ fun ProfilesTab(
 
     fun openEditor(profile: ConnectionProfile? = null) {
         editingProfileId = profile?.id
+        val protocol = SettingsStore.normalizeServerProtocol(
+            profile?.serverProtocol ?: SettingsStore.SERVER_PROTOCOL_WDTT
+        )
+        serverProtocolInput = protocol
         nameInput = profile?.name ?: ""
-        peerInput = profile?.peer ?: currentPeer
-        hashesInput = profile?.vkHashes ?: currentHashes
+        peerInput = if (protocol == SettingsStore.SERVER_PROTOCOL_CSQTT) {
+            // CSQTT-сервер не связан с WDTT-пиром: для нового профиля поле
+            // остаётся пустым, чтобы случайно не импортировать чужой хост.
+            PeerAddress.host(profile?.peer.orEmpty())
+        } else {
+            profile?.peer ?: currentPeer
+        }
+        hashesInput = profile?.vkHashes
+            ?: if (protocol == SettingsStore.SERVER_PROTOCOL_CSQTT) "" else currentHashes
         workersInput = (profile?.workersPerHash ?: currentWorkers).toString()
         portInput = (profile?.listenPort ?: currentPort).toString()
-        portInput = (profile?.listenPort ?: currentPort).toString()
-        passwordInput = profile?.password ?: currentPassword
+        csqttPortInput = (
+            PeerAddress.port(profile?.peer.orEmpty())
+                ?: CsqttDefaults.DEFAULT_PEER_PORT
+            ).toString()
+        csqttObfsInput = profile?.csqttObfs ?: CsqttDefaults.OBFUSCATION_UNIFIED
+        csqttTransportInput = profile?.csqttTransport ?: CsqttDefaults.TURN_TRANSPORT_UDP
+        csqttSrtpInput = profile?.csqttSrtp ?: CsqttDefaults.SRTP_MODE_AUTO
+        csqttHashModeInput = profile?.csqttHashMode ?: CsqttDefaults.VK_HASH_MODE_MANUAL
+        csqttTokenInput = profile?.csqttAccessToken.orEmpty()
+        csqttFingerprintInput = profile?.csqttFingerprint ?: CsqttDefaults.FINGERPRINT_CHROME
+        csqttClientIdsInput = profile?.csqttClientIds.orEmpty()
+        csqttTurnIpsInput = profile?.csqttCustomTurnIps.orEmpty()
+        csqttDomainRoutingInput = profile?.csqttDomainRouting ?: false
+        csqttExcludeRuInput = profile?.csqttExcludeRuZones ?: false
+        csqttDirectDomainsInput = profile?.csqttDirectDomains.orEmpty()
+        csqttDirectIpsInput = profile?.csqttDirectIps.orEmpty()
+        passwordInput = profile?.password
+            ?: if (protocol == SettingsStore.SERVER_PROTOCOL_CSQTT) "" else currentPassword
         useGlobalHashesInput = profile?.useGlobalHashes ?: true
         editorVisible = true
     }
 
     fun saveEditor() {
         if (!editorVisible) return
-        editorVisible = false
-        
-        val name = nameInput.trim()
-        val peer = peerInput.trim()
-        val hashes = hashesInput.trim()
-        val workers = workersInput.toIntOrNull()?.coerceIn(1, SettingsStore.MAX_TOTAL_WORKERS) ?: 9
-        val port = portInput.toIntOrNull()?.coerceIn(1, 65535) ?: 9000
-        val password = passwordInput
-        
-        if (name.isBlank() || peer.isBlank() || (!useGlobalHashesInput && hashes.isBlank()) || password.isBlank()) {
-            editorVisible = true // Revert if validation fails
+
+        val protocol = SettingsStore.normalizeServerProtocol(serverProtocolInput)
+        val isCsqtt = protocol == SettingsStore.SERVER_PROTOCOL_CSQTT
+        if (isCsqtt && !csqttBundled) {
+            Toast.makeText(
+                context,
+                "Движок CSQTT не входит в эту сборку. Используйте APK с -PcsqttEngine=true.",
+                Toast.LENGTH_LONG,
+            ).show()
             return
         }
 
+        val name = nameInput.trim()
+        val hostOrPeer = peerInput.trim()
+        val hashes = hashesInput.trim()
+        val workers = workersInput.toIntOrNull()?.coerceIn(1, SettingsStore.MAX_TOTAL_WORKERS) ?: 9
+        val port = portInput.toIntOrNull()?.coerceIn(1, 65535) ?: 9000
+        val csqttPort = csqttPortInput.toIntOrNull()?.coerceIn(1, 65535)
+            ?: CsqttDefaults.DEFAULT_PEER_PORT
+        val password = passwordInput
+        val hashesForSave = hashes
+        val hasCredentials = hashesForSave.isNotBlank() ||
+            csqttTokenInput.isNotBlank() ||
+            (useGlobalHashesInput && globalHashes.isNotBlank())
+        val peer = if (isCsqtt) {
+            CsqttDefaults.peerHostPort(PeerAddress.host(hostOrPeer), csqttPort)
+        } else {
+            hostOrPeer
+        }
+
+        val invalid = name.isBlank() || hostOrPeer.isBlank() || password.isBlank() ||
+            (isCsqtt && !hasCredentials) ||
+            (!isCsqtt && !useGlobalHashesInput && hashes.isBlank())
+        if (invalid) {
+            Toast.makeText(
+                context,
+                if (isCsqtt) "Заполните сервер, пароль и VK-хеши или токен"
+                else "Заполните название, сервер, пароль и хеши",
+                Toast.LENGTH_LONG,
+            ).show()
+            return
+        }
+
+        editorVisible = false
         val currentEditId = editingProfileId
-        val useGlobal = useGlobalHashesInput
+        val useGlobal = if (isCsqtt) false else useGlobalHashesInput
+        val hashMode = if (isCsqtt && csqttTokenInput.isNotBlank() && hashes.isBlank()) {
+            CsqttDefaults.VK_HASH_MODE_AUTO_JS
+        } else if (isCsqtt) {
+            CsqttDefaults.normalizeVkHashMode(csqttHashModeInput)
+        } else {
+            CsqttDefaults.VK_HASH_MODE_MANUAL
+        }
         scope.launch {
-            if (currentEditId == null) {
-                val p = profilesStore.createProfile(name, peer, hashes, workers, port, password, "")
-                profilesStore.saveProfile(p.copy(useGlobalHashes = useGlobal))
-            } else {
-                val existingProfile = profiles.firstOrNull { it.id == currentEditId }
-                val existingTraffic = existingProfile?.trafficMb ?: 0.0
-                val existingGroupId = existingProfile?.groupId ?: ""
-                profilesStore.saveProfile(
-                    ConnectionProfile(
-                        id = currentEditId,
-                        name = name,
-                        peer = peer,
-                        vkHashes = hashes,
-                        workersPerHash = workers,
-                        listenPort = port,
-                        password = password,
-                        trafficMb = existingTraffic,
-                        groupId = existingGroupId,
-                        useGlobalHashes = useGlobal,
-                        // Ключ диагностики привязан к серверу: сменили сервер —
-                        // старый ключ больше не подходит.
-                        diagKey = existingProfile?.diagKey?.takeIf {
-                            PeerAddress.host(existingProfile.peer).equals(PeerAddress.host(peer), ignoreCase = true)
-                        } ?: ""
-                    )
-                )
-            }
+            val existingProfile = profiles.firstOrNull { it.id == currentEditId }
+            val target = ConnectionProfile(
+                id = currentEditId ?: UUID.randomUUID().toString(),
+                name = name,
+                peer = peer,
+                vkHashes = hashesForSave,
+                workersPerHash = workers,
+                listenPort = port,
+                password = password,
+                trafficMb = existingProfile?.trafficMb ?: 0.0,
+                groupId = existingProfile?.groupId ?: "",
+                useGlobalHashes = useGlobal,
+                // Ключ диагностики привязан к серверу: сменили сервер —
+                // старый ключ больше не подходит (для CSQTT не используется).
+                diagKey = if (isCsqtt) "" else existingProfile?.diagKey?.takeIf {
+                    PeerAddress.host(existingProfile?.peer.orEmpty()).equals(PeerAddress.host(peer), ignoreCase = true)
+                } ?: "",
+                serverProtocol = protocol,
+                csqttObfs = csqttObfsInput,
+                csqttTransport = csqttTransportInput,
+                csqttSrtp = csqttSrtpInput,
+                csqttFingerprint = csqttFingerprintInput,
+                csqttHashMode = hashMode,
+                csqttAccessToken = if (isCsqtt) csqttTokenInput.trim() else "",
+                csqttClientIds = if (isCsqtt) csqttClientIdsInput.trim() else "",
+                csqttCustomTurnIps = if (isCsqtt) csqttTurnIpsInput.trim() else "",
+                csqttDomainRouting = if (isCsqtt) csqttDomainRoutingInput else false,
+                csqttExcludeRuZones = if (isCsqtt) csqttExcludeRuInput else false,
+                csqttDirectDomains = if (isCsqtt) csqttDirectDomainsInput.trim() else "",
+                csqttDirectIps = if (isCsqtt) csqttDirectIpsInput.trim() else "",
+            )
+            profilesStore.saveProfile(target)
         }
     }
 
@@ -534,44 +750,232 @@ fun ProfilesTab(
             modifier = Modifier.imePadding(),
             title = { Text(if (editingProfileId == null) "Новый профиль" else "Редактировать профиль") },
             text = {
+                val isCsqttInput =
+                    SettingsStore.normalizeServerProtocol(serverProtocolInput) ==
+                        SettingsStore.SERVER_PROTOCOL_CSQTT
                 Column(
                     verticalArrangement = Arrangement.spacedBy(10.dp),
                     modifier = Modifier.verticalScroll(rememberScrollState())
                 ) {
-                    OutlinedTextField(value = nameInput, onValueChange = { nameInput = it }, label = { Text("Название") }, singleLine = true)
-                    OutlinedTextField(value = peerInput, onValueChange = { peerInput = it }, label = { Text("Peer") }, singleLine = true)
-                    
-                    Row(
-                        modifier = Modifier
-                            .fillMaxWidth()
-                            .clickable { useGlobalHashesInput = !useGlobalHashesInput }
-                            .padding(vertical = 8.dp),
-                        verticalAlignment = Alignment.CenterVertically
-                    ) {
-                        Text(
-                            text = "Использовать общие хеши",
-                            modifier = Modifier.weight(1f),
-                            style = MaterialTheme.typography.bodyMedium
+                    Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                        androidx.compose.material3.FilterChip(
+                            selected = !isCsqttInput,
+                            onClick = { serverProtocolInput = SettingsStore.SERVER_PROTOCOL_WDTT },
+                            label = { Text("WDTT") }
                         )
-                        androidx.compose.material3.Switch(
-                            checked = useGlobalHashesInput,
-                            onCheckedChange = { useGlobalHashesInput = it }
+                        androidx.compose.material3.FilterChip(
+                            selected = isCsqttInput,
+                            onClick = { serverProtocolInput = SettingsStore.SERVER_PROTOCOL_CSQTT },
+                            label = { Text("CSQTT") }
                         )
                     }
 
-                    if (!useGlobalHashesInput) {
-                        OutlinedTextField(value = hashesInput, onValueChange = { hashesInput = it }, label = { Text("VK-хеши") }, minLines = 2)
-                    } else {
-                        OutlinedTextField(
-                            value = globalHashes.ifEmpty { "Не заданы (настройте на главной)" },
-                            onValueChange = {},
-                            label = { Text("VK Хеши (из главной вкладки)") },
-                            minLines = 2,
-                            enabled = false,
-                            modifier = Modifier.fillMaxWidth()
+                    if (isCsqttInput && !csqttBundled) {
+                        Text(
+                            text = "Движок CSQTT не входит в эту сборку (нет libcsqtt.so). " +
+                                "Профиль можно сохранить, но подключение не запустится — " +
+                                "нужна сборка с -PcsqttEngine=true.",
+                            style = MaterialTheme.typography.bodySmall,
+                            color = MaterialTheme.colorScheme.error
                         )
                     }
-                    
+
+                    OutlinedTextField(value = nameInput, onValueChange = { nameInput = it }, label = { Text("Название") }, singleLine = true)
+
+                    if (isCsqttInput) {
+                        OutlinedTextField(
+                            value = peerInput,
+                            onValueChange = { peerInput = it },
+                            label = { Text("Сервер (host или IP)") },
+                            singleLine = true,
+                            modifier = Modifier.fillMaxWidth()
+                        )
+                        OutlinedTextField(
+                            value = csqttPortInput,
+                            onValueChange = { csqttPortInput = it.filter(Char::isDigit) },
+                            label = { Text("Порт сервера CSQTT") },
+                            placeholder = { Text(CsqttDefaults.DEFAULT_PEER_PORT.toString()) },
+                            keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Number),
+                            singleLine = true,
+                            modifier = Modifier.fillMaxWidth()
+                        )
+                        OutlinedTextField(
+                            value = hashesInput,
+                            onValueChange = { hashesInput = it },
+                            label = { Text("VK-хеши (через запятую)") },
+                            minLines = 2,
+                            modifier = Modifier.fillMaxWidth()
+                        )
+                        OutlinedTextField(
+                            value = csqttTokenInput,
+                            onValueChange = { csqttTokenInput = it },
+                            label = { Text("VK access token (auto_js)") },
+                            supportingText = { Text("Нужен либо токен, либо хотя бы один хеш") },
+                            singleLine = true,
+                            modifier = Modifier.fillMaxWidth()
+                        )
+
+                        Text("Обфускация", style = MaterialTheme.typography.labelLarge)
+                        Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                            listOf(
+                                CsqttDefaults.OBFUSCATION_AUDIO to "Аудио",
+                                CsqttDefaults.OBFUSCATION_VIDEO to "Видео",
+                                CsqttDefaults.OBFUSCATION_UNIFIED to "Unified"
+                            ).forEach { (value, label) ->
+                                androidx.compose.material3.FilterChip(
+                                    selected = csqttObfsInput == value,
+                                    onClick = { csqttObfsInput = value },
+                                    label = { Text(label) }
+                                )
+                            }
+                        }
+
+                        Text("Транспорт", style = MaterialTheme.typography.labelLarge)
+                        Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                            listOf(
+                                CsqttDefaults.TURN_TRANSPORT_UDP to "UDP",
+                                CsqttDefaults.TURN_TRANSPORT_TCP_TLS to "TCP/TLS"
+                            ).forEach { (value, label) ->
+                                androidx.compose.material3.FilterChip(
+                                    selected = csqttTransportInput == value,
+                                    onClick = { csqttTransportInput = value },
+                                    label = { Text(label) }
+                                )
+                            }
+                        }
+
+                        Text("SRTP", style = MaterialTheme.typography.labelLarge)
+                        Row(
+                            horizontalArrangement = Arrangement.spacedBy(8.dp),
+                            modifier = Modifier.horizontalScroll(rememberScrollState())
+                        ) {
+                            listOf(
+                                CsqttDefaults.SRTP_MODE_AUTO to "Авто",
+                                CsqttDefaults.SRTP_MODE_WRAP to "Wrap",
+                                CsqttDefaults.SRTP_MODE_DTLS to "DTLS"
+                            ).forEach { (value, label) ->
+                                androidx.compose.material3.FilterChip(
+                                    selected = csqttSrtpInput == value,
+                                    onClick = { csqttSrtpInput = value },
+                                    label = { Text(label) }
+                                )
+                            }
+                        }
+
+                        OutlinedTextField(
+                            value = csqttFingerprintInput,
+                            onValueChange = { csqttFingerprintInput = it },
+                            label = { Text("TLS fingerprint") },
+                            supportingText = { Text("chrome, firefox, safari, edge, opera") },
+                            singleLine = true,
+                            modifier = Modifier.fillMaxWidth()
+                        )
+                        OutlinedTextField(
+                            value = csqttClientIdsInput,
+                            onValueChange = { csqttClientIdsInput = it },
+                            label = { Text("client-ids через запятую") },
+                            minLines = 1,
+                            modifier = Modifier.fillMaxWidth()
+                        )
+                        OutlinedTextField(
+                            value = csqttTurnIpsInput,
+                            onValueChange = { csqttTurnIpsInput = it },
+                            label = { Text("Свои TURN-IP через запятую") },
+                            supportingText = { Text("Пусто — адреса VK") },
+                            minLines = 1,
+                            modifier = Modifier.fillMaxWidth()
+                        )
+
+                        Row(
+                            modifier = Modifier
+                                .fillMaxWidth()
+                                .clickable { csqttDomainRoutingInput = !csqttDomainRoutingInput }
+                                .padding(vertical = 6.dp),
+                            verticalAlignment = Alignment.CenterVertically
+                        ) {
+                            Text(
+                                text = "Маршрутизация по доменам",
+                                modifier = Modifier.weight(1f),
+                                style = MaterialTheme.typography.bodyMedium
+                            )
+                            androidx.compose.material3.Switch(
+                                checked = csqttDomainRoutingInput,
+                                onCheckedChange = { csqttDomainRoutingInput = it }
+                            )
+                        }
+                        Row(
+                            modifier = Modifier
+                                .fillMaxWidth()
+                                .clickable { csqttExcludeRuInput = !csqttExcludeRuInput }
+                                .padding(vertical = 6.dp),
+                            verticalAlignment = Alignment.CenterVertically
+                        ) {
+                            Text(
+                                text = "Исключить российские зоны",
+                                modifier = Modifier.weight(1f),
+                                style = MaterialTheme.typography.bodyMedium
+                            )
+                            androidx.compose.material3.Switch(
+                                checked = csqttExcludeRuInput,
+                                onCheckedChange = { csqttExcludeRuInput = it }
+                            )
+                        }
+                        OutlinedTextField(
+                            value = csqttDirectDomainsInput,
+                            onValueChange = { csqttDirectDomainsInput = it },
+                            label = { Text("Прямые домены через запятую") },
+                            minLines = 1,
+                            modifier = Modifier.fillMaxWidth()
+                        )
+                        OutlinedTextField(
+                            value = csqttDirectIpsInput,
+                            onValueChange = { csqttDirectIpsInput = it },
+                            label = { Text("Прямые IP/CIDR через запятую") },
+                            minLines = 1,
+                            modifier = Modifier.fillMaxWidth()
+                        )
+
+                        Text(
+                            "Пробный сервер CSQTT (UDP 46000). Профили WDTT не затрагиваются — " +
+                                "протокол хранится в профиле.",
+                            style = MaterialTheme.typography.bodySmall,
+                            color = MaterialTheme.colorScheme.onSurfaceVariant
+                        )
+                    } else {
+                        OutlinedTextField(value = peerInput, onValueChange = { peerInput = it }, label = { Text("Peer") }, singleLine = true)
+
+                        Row(
+                            modifier = Modifier
+                                .fillMaxWidth()
+                                .clickable { useGlobalHashesInput = !useGlobalHashesInput }
+                                .padding(vertical = 8.dp),
+                            verticalAlignment = Alignment.CenterVertically
+                        ) {
+                            Text(
+                                text = "Использовать общие хеши",
+                                modifier = Modifier.weight(1f),
+                                style = MaterialTheme.typography.bodyMedium
+                            )
+                            androidx.compose.material3.Switch(
+                                checked = useGlobalHashesInput,
+                                onCheckedChange = { useGlobalHashesInput = it }
+                            )
+                        }
+
+                        if (!useGlobalHashesInput) {
+                            OutlinedTextField(value = hashesInput, onValueChange = { hashesInput = it }, label = { Text("VK-хеши") }, minLines = 2)
+                        } else {
+                            OutlinedTextField(
+                                value = globalHashes.ifEmpty { "Не заданы (настройте на главной)" },
+                                onValueChange = {},
+                                label = { Text("VK Хеши (из главной вкладки)") },
+                                minLines = 2,
+                                enabled = false,
+                                modifier = Modifier.fillMaxWidth()
+                            )
+                        }
+                    }
+
                     OutlinedTextField(
                         value = workersInput,
                         onValueChange = { workersInput = it.filter(Char::isDigit) },
@@ -788,14 +1192,22 @@ fun ProfilesTab(
                             verticalArrangement = Arrangement.spacedBy(6.dp)
                         ) {
                             Text("📝 Название: ${profile.name}", style = MaterialTheme.typography.bodyMedium, fontWeight = FontWeight.Medium)
+                            Text(
+                                "🔌 Протокол: ${if (profile.isCsqtt) "CSQTT" else "WDTT"}",
+                                style = MaterialTheme.typography.bodyMedium
+                            )
                             Text("🌐 Сервер: ${profile.peer}", style = MaterialTheme.typography.bodyMedium)
                             Text("⚡ Потоков: ${profile.workersPerHash}", style = MaterialTheme.typography.bodyMedium)
-                            val hashCount = if (profile.vkHashes.isBlank()) 0 else profile.vkHashes.trim().split(",").count { it.isNotBlank() }
-                            Text("🔑 Хешей: $hashCount", style = MaterialTheme.typography.bodyMedium)
+                            if (profile.isCsqtt && profile.csqttAccessToken.isNotBlank()) {
+                                Text("🔑 Авторизация: VK access token", style = MaterialTheme.typography.bodyMedium)
+                            } else {
+                                val hashCount = if (profile.vkHashes.isBlank()) 0 else profile.vkHashes.trim().split(",").count { it.isNotBlank() }
+                                Text("🔑 Хешей: $hashCount", style = MaterialTheme.typography.bodyMedium)
+                            }
                         }
                     }
 
-                    if (profile.vkHashes.isBlank()) {
+                    if (profile.vkHashes.isBlank() && !(profile.isCsqtt && profile.csqttAccessToken.isNotBlank())) {
                         Surface(
                             shape = RoundedCornerShape(10.dp),
                             color = MaterialTheme.colorScheme.tertiaryContainer.copy(alpha = 0.6f),
@@ -1577,6 +1989,19 @@ fun ProfilesTab(
                                         overflow = androidx.compose.ui.text.style.TextOverflow.Ellipsis,
                                         modifier = Modifier.weight(1f, fill = false)
                                     )
+                                    if (profile.isCsqtt) {
+                                        Surface(
+                                            shape = RoundedCornerShape(6.dp),
+                                            color = MaterialTheme.colorScheme.tertiaryContainer
+                                        ) {
+                                            Text(
+                                                "CSQTT",
+                                                style = MaterialTheme.typography.labelSmall,
+                                                color = MaterialTheme.colorScheme.onTertiaryContainer,
+                                                modifier = Modifier.padding(horizontal = 6.dp, vertical = 2.dp)
+                                            )
+                                        }
+                                    }
                                 }
                                 Row(
                                     verticalAlignment = Alignment.CenterVertically,
@@ -1947,11 +2372,18 @@ fun ProfilesTab(
                                 val parsed = parseMultipleConfigs(text)
                                 if (parsed != null) {
                                     if (parsed.profiles.size == 1) {
-                                        scannedProfile = parsed.profiles.first()
+                                        val single = parsed.profiles.first()
+                                        if (single.isCsqtt) {
+                                            applyImportedProfile(single)
+                                            Toast.makeText(context, "Профиль CSQTT сохранён и применён", Toast.LENGTH_SHORT).show()
+                                        } else {
+                                            scannedProfile = single
+                                            Toast.makeText(context, "Конфигурация успешно прочитана!", Toast.LENGTH_SHORT).show()
+                                        }
                                     } else {
                                         scannedMultipleProfiles = parsed
+                                        Toast.makeText(context, "Конфигурация успешно прочитана!", Toast.LENGTH_SHORT).show()
                                     }
-                                    Toast.makeText(context, "Конфигурация успешно прочитана!", Toast.LENGTH_SHORT).show()
                                 } else {
                                     Toast.makeText(context, "В буфере обмена нет подходящей конфигурации", Toast.LENGTH_LONG).show()
                                 }
@@ -1992,7 +2424,13 @@ fun ProfilesTab(
                                     val parsed = parseMultipleConfigs(rawText)
                                     if (parsed != null) {
                                         if (parsed.profiles.size == 1) {
-                                            scannedProfile = parsed.profiles.first()
+                                            val single = parsed.profiles.first()
+                                            if (single.isCsqtt) {
+                                                applyImportedProfile(single)
+                                                Toast.makeText(context, "Профиль CSQTT сохранён и применён", Toast.LENGTH_SHORT).show()
+                                            } else {
+                                                scannedProfile = single
+                                            }
                                         } else {
                                             scannedMultipleProfiles = parsed
                                         }

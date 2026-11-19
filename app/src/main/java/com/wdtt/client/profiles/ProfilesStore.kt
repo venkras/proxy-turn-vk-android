@@ -7,6 +7,7 @@ import androidx.datastore.preferences.core.booleanPreferencesKey
 import androidx.datastore.preferences.core.edit
 import androidx.datastore.preferences.core.emptyPreferences
 import androidx.datastore.preferences.preferencesDataStore
+import com.wdtt.client.csqtt.CsqttDefaults
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.flow.Flow
 import kotlinx.coroutines.flow.catch
@@ -27,8 +28,27 @@ data class ConnectionProfile(
     val groupId: String = "",
     val useGlobalHashes: Boolean = vkHashes.isBlank(),
     /** Ключ диагностики сервера (dk= из ссылки бота), пусто — нет. */
-    val diagKey: String = ""
-)
+    val diagKey: String = "",
+    /** Протокол сервера: wdtt (по умолчанию) или csqtt. */
+    val serverProtocol: String = SettingsStore.SERVER_PROTOCOL_WDTT,
+    // ═══ Параметры CSQTT (используются только при serverProtocol = csqtt) ═══
+    val csqttObfs: String = "unified",
+    val csqttTransport: String = "udp",
+    val csqttSrtp: String = "auto",
+    val csqttFingerprint: String = "chrome",
+    val csqttHashMode: String = "manual",
+    /** VK access token для auto_js; хранится в защищённом хранилище. */
+    val csqttAccessToken: String = "",
+    val csqttClientIds: String = "",
+    val csqttCustomTurnIps: String = "",
+    val csqttDomainRouting: Boolean = false,
+    val csqttExcludeRuZones: Boolean = false,
+    val csqttDirectDomains: String = "",
+    val csqttDirectIps: String = ""
+) {
+    val isCsqtt: Boolean
+        get() = SettingsStore.normalizeServerProtocol(serverProtocol) == SettingsStore.SERVER_PROTOCOL_CSQTT
+}
 
 data class ProfileGroup(
     val id: String,
@@ -67,6 +87,19 @@ class ProfilesStore(context: Context) {
         private fun trafficKey(id: String) = androidx.datastore.preferences.core.doublePreferencesKey("profile_traffic_$id")
         private fun groupIdKey(id: String) = stringPreferencesKey("profile_group_id_$id")
         private fun diagKeyKey(id: String) = stringPreferencesKey("profile_diag_key_enc_$id")
+        private fun protocolKey(id: String) = stringPreferencesKey("profile_protocol_$id")
+        private fun csqttObfsKey(id: String) = stringPreferencesKey("profile_csqtt_obfs_$id")
+        private fun csqttTransportKey(id: String) = stringPreferencesKey("profile_csqtt_transport_$id")
+        private fun csqttSrtpKey(id: String) = stringPreferencesKey("profile_csqtt_srtp_$id")
+        private fun csqttFingerprintKey(id: String) = stringPreferencesKey("profile_csqtt_fingerprint_$id")
+        private fun csqttHashModeKey(id: String) = stringPreferencesKey("profile_csqtt_hash_mode_$id")
+        private fun csqttTokenKey(id: String) = stringPreferencesKey("profile_csqtt_token_enc_$id")
+        private fun csqttClientIdsKey(id: String) = stringPreferencesKey("profile_csqtt_client_ids_$id")
+        private fun csqttTurnIpsKey(id: String) = stringPreferencesKey("profile_csqtt_turn_ips_$id")
+        private fun csqttDomainRoutingKey(id: String) = booleanPreferencesKey("profile_csqtt_domain_routing_$id")
+        private fun csqttExcludeRuKey(id: String) = booleanPreferencesKey("profile_csqtt_exclude_ru_$id")
+        private fun csqttDirectDomainsKey(id: String) = stringPreferencesKey("profile_csqtt_direct_domains_$id")
+        private fun csqttDirectIpsKey(id: String) = stringPreferencesKey("profile_csqtt_direct_ips_$id")
 
         private const val GROUPS_IDS_KEY = "groups_ids"
         private fun groupsIdsKey() = stringPreferencesKey(GROUPS_IDS_KEY)
@@ -107,7 +140,34 @@ class ProfilesStore(context: Context) {
                 val groupId = prefs[groupIdKey(id)] ?: ""
                 val useGlobal = prefs[useGlobalHashesKey(id)] ?: true
                 val diagKey = secureStore.decrypt(prefs[diagKeyKey(id)] ?: "") ?: ""
-                list.add(ConnectionProfile(id, name, peer, hashes, workers, port, pass, traffic, groupId, useGlobal, diagKey))
+                list.add(
+                    ConnectionProfile(
+                        id = id,
+                        name = name,
+                        peer = peer,
+                        vkHashes = hashes,
+                        workersPerHash = workers,
+                        listenPort = port,
+                        password = pass,
+                        trafficMb = traffic,
+                        groupId = groupId,
+                        useGlobalHashes = useGlobal,
+                        diagKey = diagKey,
+                        serverProtocol = SettingsStore.normalizeServerProtocol(prefs[protocolKey(id)]),
+                        csqttObfs = prefs[csqttObfsKey(id)] ?: "unified",
+                        csqttTransport = prefs[csqttTransportKey(id)] ?: "udp",
+                        csqttSrtp = prefs[csqttSrtpKey(id)] ?: "auto",
+                        csqttFingerprint = prefs[csqttFingerprintKey(id)] ?: "chrome",
+                        csqttHashMode = prefs[csqttHashModeKey(id)] ?: "manual",
+                        csqttAccessToken = secureStore.decrypt(prefs[csqttTokenKey(id)] ?: "") ?: "",
+                        csqttClientIds = prefs[csqttClientIdsKey(id)] ?: "",
+                        csqttCustomTurnIps = prefs[csqttTurnIpsKey(id)] ?: "",
+                        csqttDomainRouting = prefs[csqttDomainRoutingKey(id)] ?: false,
+                        csqttExcludeRuZones = prefs[csqttExcludeRuKey(id)] ?: false,
+                        csqttDirectDomains = prefs[csqttDirectDomainsKey(id)] ?: "",
+                        csqttDirectIps = prefs[csqttDirectIpsKey(id)] ?: "",
+                    )
+                )
             }
             list
         }
@@ -347,6 +407,23 @@ class ProfilesStore(context: Context) {
             } else {
                 prefs[diagKeyKey(profile.id)] = secureStore.encrypt(profile.diagKey)
             }
+            prefs[protocolKey(profile.id)] = SettingsStore.normalizeServerProtocol(profile.serverProtocol)
+            prefs[csqttObfsKey(profile.id)] = profile.csqttObfs
+            prefs[csqttTransportKey(profile.id)] = profile.csqttTransport
+            prefs[csqttSrtpKey(profile.id)] = profile.csqttSrtp
+            prefs[csqttFingerprintKey(profile.id)] = profile.csqttFingerprint
+            prefs[csqttHashModeKey(profile.id)] = profile.csqttHashMode
+            if (profile.csqttAccessToken.isBlank()) {
+                prefs.remove(csqttTokenKey(profile.id))
+            } else {
+                prefs[csqttTokenKey(profile.id)] = secureStore.encrypt(profile.csqttAccessToken)
+            }
+            prefs[csqttClientIdsKey(profile.id)] = profile.csqttClientIds
+            prefs[csqttTurnIpsKey(profile.id)] = profile.csqttCustomTurnIps
+            prefs[csqttDomainRoutingKey(profile.id)] = profile.csqttDomainRouting
+            prefs[csqttExcludeRuKey(profile.id)] = profile.csqttExcludeRuZones
+            prefs[csqttDirectDomainsKey(profile.id)] = profile.csqttDirectDomains
+            prefs[csqttDirectIpsKey(profile.id)] = profile.csqttDirectIps
         }
     }
 
@@ -376,6 +453,19 @@ class ProfilesStore(context: Context) {
             prefs.remove(trafficKey(id))
             prefs.remove(groupIdKey(id))
             prefs.remove(diagKeyKey(id))
+            prefs.remove(protocolKey(id))
+            prefs.remove(csqttObfsKey(id))
+            prefs.remove(csqttTransportKey(id))
+            prefs.remove(csqttSrtpKey(id))
+            prefs.remove(csqttFingerprintKey(id))
+            prefs.remove(csqttHashModeKey(id))
+            prefs.remove(csqttTokenKey(id))
+            prefs.remove(csqttClientIdsKey(id))
+            prefs.remove(csqttTurnIpsKey(id))
+            prefs.remove(csqttDomainRoutingKey(id))
+            prefs.remove(csqttExcludeRuKey(id))
+            prefs.remove(csqttDirectDomainsKey(id))
+            prefs.remove(csqttDirectIpsKey(id))
         }
     }
 
@@ -432,9 +522,28 @@ class ProfilesStore(context: Context) {
         }
     }
 
-    suspend fun createProfile(name: String, peer: String, vkHashes: String, workers: Int, listenPort: Int, password: String, groupId: String = ""): ConnectionProfile {
+    suspend fun createProfile(
+        name: String,
+        peer: String,
+        vkHashes: String,
+        workers: Int,
+        listenPort: Int,
+        password: String,
+        groupId: String = "",
+        serverProtocol: String = SettingsStore.SERVER_PROTOCOL_WDTT,
+    ): ConnectionProfile {
         val id = UUID.randomUUID().toString()
-        val p = ConnectionProfile(id, name, peer, vkHashes, workers, listenPort, password, 0.0, groupId)
+        val p = ConnectionProfile(
+            id = id,
+            name = name,
+            peer = peer,
+            vkHashes = vkHashes,
+            workersPerHash = workers,
+            listenPort = listenPort,
+            password = password,
+            groupId = groupId,
+            serverProtocol = serverProtocol,
+        )
         saveProfile(p)
         return p
     }
@@ -452,7 +561,32 @@ class ProfilesStore(context: Context) {
         val groupId = prefs[groupIdKey(id)] ?: ""
         val useGlobal = prefs[useGlobalHashesKey(id)] ?: hashes.isBlank()
         val diagKey = secureStore.decrypt(prefs[diagKeyKey(id)] ?: "") ?: ""
-        return ConnectionProfile(id, name, peer, hashes, workers, port, pass, traffic, groupId, useGlobal, diagKey)
+        return ConnectionProfile(
+            id = id,
+            name = name,
+            peer = peer,
+            vkHashes = hashes,
+            workersPerHash = workers,
+            listenPort = port,
+            password = pass,
+            trafficMb = traffic,
+            groupId = groupId,
+            useGlobalHashes = useGlobal,
+            diagKey = diagKey,
+            serverProtocol = SettingsStore.normalizeServerProtocol(prefs[protocolKey(id)]),
+            csqttObfs = prefs[csqttObfsKey(id)] ?: "unified",
+            csqttTransport = prefs[csqttTransportKey(id)] ?: "udp",
+            csqttSrtp = prefs[csqttSrtpKey(id)] ?: "auto",
+            csqttFingerprint = prefs[csqttFingerprintKey(id)] ?: "chrome",
+            csqttHashMode = prefs[csqttHashModeKey(id)] ?: "manual",
+            csqttAccessToken = secureStore.decrypt(prefs[csqttTokenKey(id)] ?: "") ?: "",
+            csqttClientIds = prefs[csqttClientIdsKey(id)] ?: "",
+            csqttCustomTurnIps = prefs[csqttTurnIpsKey(id)] ?: "",
+            csqttDomainRouting = prefs[csqttDomainRoutingKey(id)] ?: false,
+            csqttExcludeRuZones = prefs[csqttExcludeRuKey(id)] ?: false,
+            csqttDirectDomains = prefs[csqttDirectDomainsKey(id)] ?: "",
+            csqttDirectIps = prefs[csqttDirectIpsKey(id)] ?: "",
+        )
     }
 
     suspend fun incrementProfileTraffic(id: String, additionalTrafficMb: Double) = withContext(Dispatchers.IO) {
@@ -484,8 +618,13 @@ class ProfilesStore(context: Context) {
     // Apply profile: save to SettingsStore
     suspend fun applyProfile(context: Context, id: String) {
         val p = getProfileOnce(id) ?: return
+        val isCsqtt = p.isCsqtt
         // save to settings
-        val finalHashes = if (p.useGlobalHashes) {
+        val finalHashes = if (isCsqtt) {
+            // Для CSQTT общие WDTT-хеши не подставляем: у профиля свой набор
+            // либо VK access token для auto_js.
+            p.vkHashes
+        } else if (p.useGlobalHashes) {
             val global = settings.globalVkHashes.first()
             global.ifEmpty { p.vkHashes }
         } else {
@@ -493,10 +632,44 @@ class ProfilesStore(context: Context) {
         }
         val manualPorts = settings.manualPortsEnabled.first()
         val serverDtlsPort = if (manualPorts) settings.serverDtlsPort.first() else 56000
-        val peerWithPort = PeerAddress.ensurePort(p.peer, serverDtlsPort)
+        val csqttPort = PeerAddress.port(p.peer)
+            ?.takeIf { it in 1..65535 }
+            ?: CsqttDefaults.DEFAULT_PEER_PORT
+        val peerWithPort = if (isCsqtt) {
+            PeerAddress.ensurePort(p.peer, csqttPort)
+        } else {
+            PeerAddress.ensurePort(p.peer, serverDtlsPort)
+        }
         settings.save(peerWithPort, finalHashes, "", p.workersPerHash, "udp", p.listenPort)
         settings.saveConnectionPassword(p.password)
         settings.saveDiagKey(p.diagKey)
+        settings.saveServerProtocol(p.serverProtocol)
+        val currentMode = settings.connectionMode.first()
+        if (isCsqtt) {
+            // CSQTT-профиль всегда означает CSQTT-режим (чип в настройках
+            // подключения должен отражать реальное состояние).
+            settings.saveConnectionMode(SettingsStore.CONNECTION_MODE_CSQTT)
+        } else if (currentMode == SettingsStore.CONNECTION_MODE_CSQTT) {
+            // Иначе после CSQTT-профиля WDTT-профиль остался бы в CSQTT-режиме.
+            settings.saveConnectionMode(SettingsStore.CONNECTION_MODE_VPN)
+        }
+        if (isCsqtt) {
+            settings.saveCsqtt(
+                peerPort = csqttPort,
+                obfs = p.csqttObfs,
+                transport = p.csqttTransport,
+                srtpMode = p.csqttSrtp,
+                fingerprint = p.csqttFingerprint,
+                vkHashMode = p.csqttHashMode,
+                accessToken = p.csqttAccessToken,
+                clientIds = p.csqttClientIds,
+                customTurnIps = p.csqttCustomTurnIps,
+                domainRouting = p.csqttDomainRouting,
+                excludeRuZones = p.csqttExcludeRuZones,
+                directDomains = p.csqttDirectDomains,
+                directIps = p.csqttDirectIps,
+            )
+        }
         settings.saveCurrentProfile(p.id, p.name)
     }
 }

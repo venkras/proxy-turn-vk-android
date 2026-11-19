@@ -40,9 +40,14 @@ class RawTunVpnService : VpnService() {
         super.onDestroy()
     }
 
-    /** Поднимает TUN с параметрами из RAWCONF. */
-    fun establish(ip: String, dnsCsv: String, mtu: Int): ParcelFileDescriptor {
-        diag("establish() start: ip=$ip mtu=$mtu dnsCsv=$dnsCsv")
+    /** Поднимает TUN с параметрами из RAWCONF/CSQTT. */
+    fun establish(
+        ip: String,
+        dnsCsv: String,
+        mtu: Int,
+        sessionName: String = DEFAULT_SESSION_NAME,
+    ): ParcelFileDescriptor {
+        diag("establish() start: ip=$ip mtu=$mtu dnsCsv=$dnsCsv session=$sessionName")
         diag("Android: SDK=${Build.VERSION.SDK_INT} release=${Build.VERSION.RELEASE} manufacturer=${Build.MANUFACTURER} model=${Build.MODEL}")
 
         val prepareResult = prepare(this)
@@ -54,7 +59,7 @@ class RawTunVpnService : VpnService() {
 
         val builder = Builder()
         runCatching {
-            builder.setSession("qWDTT-raw")
+            builder.setSession(sessionName)
             diag("Builder.setSession OK")
         }.onFailure { diag("Builder.setSession FAILED: ${it}", isError = true) }
 
@@ -250,6 +255,9 @@ class RawTunVpnService : VpnService() {
 
     companion object {
         private const val TAG = "RawTunVpnService"
+
+        /** Имя VPN-сессии по умолчанию (обратная совместимость с rawtun). */
+        const val DEFAULT_SESSION_NAME = "qWDTT-raw"
 
         @Volatile
         var instance: RawTunVpnService? = null

@@ -72,6 +72,13 @@
                 <category android:name="android.intent.category.DEFAULT" />
                 <data android:scheme="content" />
             </intent-filter>
+            <!-- Открытие ссылок csqtt:// (импорт профиля CSQTT) -->
+            <intent-filter>
+                <action android:name="android.intent.action.VIEW" />
+                <category android:name="android.intent.category.DEFAULT" />
+                <category android:name="android.intent.category.BROWSABLE" />
+                <data android:scheme="csqtt" />
+            </intent-filter>
         </activity>
 
         <activity

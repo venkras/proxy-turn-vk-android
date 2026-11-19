@@ -25,6 +25,7 @@ object RawTunEngine {
     private var activeIp = ""
     private var activeDnsCsv = ""
     private var activeMtu = 0
+    private var activeSessionName = ""
     private var reuseTunOnNextStart = false
 
     @Volatile
@@ -36,11 +37,19 @@ object RawTunEngine {
         runCatching { TunnelManager.addRawDiagLog(message, isError) }
     }
 
-    suspend fun start(context: Context, ip: String, dnsCsv: String, mtu: Int, sockName: String) =
+    suspend fun start(
+        context: Context,
+        ip: String,
+        dnsCsv: String,
+        mtu: Int,
+        sockName: String,
+        sessionName: String = RawTunVpnService.DEFAULT_SESSION_NAME,
+        awaitAck: Boolean = false,
+    ) =
         mutex.withLock {
             withContext(Dispatchers.IO) {
                 val app = context.applicationContext
-                diag("RawTunEngine.start(): ip=$ip mtu=$mtu sockName=$sockName")
+                diag("RawTunEngine.start(): ip=$ip mtu=$mtu sockName=$sockName session=$sessionName awaitAck=$awaitAck")
                 diag("Android: SDK=${Build.VERSION.SDK_INT} manufacturer=${Build.MANUFACTURER} model=${Build.MODEL} fingerprint=${Build.FINGERPRINT}")
                 logBatteryOptimizationState(app)
 
@@ -65,7 +74,8 @@ object RawTunEngine {
                     existingTun?.fileDescriptor?.valid() == true &&
                     activeIp == ip &&
                     activeDnsCsv == dnsCsv &&
-                    activeMtu == mtu
+                    activeMtu == mtu &&
+                    activeSessionName == sessionName
                 reuseTunOnNextStart = false
 
                 val pfd = if (canReuseTun) {
@@ -73,10 +83,11 @@ object RawTunEngine {
                     diag("Повторно используем действующий RAW TUN fd=${reusableTun.fd}")
                     reusableTun
                 } else {
-                    vpn.establish(ip, dnsCsv, mtu).also {
+                    vpn.establish(ip, dnsCsv, mtu, sessionName).also {
                         activeIp = ip
                         activeDnsCsv = dnsCsv
                         activeMtu = mtu
+                        activeSessionName = sessionName
                         diag("Builder.establish() returned pfd, fd=${it.fd}")
                         TunnelManager.addNetworkLog("[RAW] TUN поднят (ip=$ip, mtu=$mtu), жду go_client…")
                     }
@@ -85,18 +96,33 @@ object RawTunEngine {
                 // Блокируется до подключения go_client — тот уже печатает
                 // "[RAW] Ожидание TUN fd..." и переподключается сам, так что
                 // здесь можно просто ждать без доп. таймаута поверх сокета.
+                // Для CSQTT (awaitAck=true) Rust подтверждает приём байтом ACK.
                 try {
-                    diag("TunFdBridge.sendOnce(sockName=$sockName) — waiting for go_client to connect and receive fd...")
-                    TunFdBridge.sendOnce(sockName, pfd)
-                    running = true
-                    diag("TunFdBridge.sendOnce() returned OK — fd handed off to go_client")
-                    TunnelManager.addNetworkLog("[RAW] TUN fd передан в go_client")
+                    if (awaitAck) {
+                        diag("TunFdBridge.sendAndAwaitAck(sockName=$sockName) — waiting for CSQTT ACK...")
+                        val acked = TunFdBridge.sendAndAwaitAck(sockName, pfd)
+                        if (!acked) {
+                            throw IllegalStateException(
+                                "Движок CSQTT не подтвердил приём TUN fd (нет ACK)",
+                            )
+                        }
+                        running = true
+                        diag("TunFdBridge.sendAndAwaitAck() returned OK — fd handed off to CSQTT")
+                        TunnelManager.addNetworkLog("[RAW] TUN fd передан в CSQTT (ACK)")
+                    } else {
+                        diag("TunFdBridge.sendOnce(sockName=$sockName) — waiting for go_client to connect and receive fd...")
+                        TunFdBridge.sendOnce(sockName, pfd)
+                        running = true
+                        diag("TunFdBridge.sendOnce() returned OK — fd handed off to go_client")
+                        TunnelManager.addNetworkLog("[RAW] TUN fd передан в go_client")
+                    }
                 } catch (e: Exception) {
-                    diag("TunFdBridge.sendOnce() THREW: ${e.javaClass.simpleName}: ${e.message}", isError = true)
+                    diag("TUN fd handoff THREW: ${e.javaClass.simpleName}: ${e.message}", isError = true)
                     running = false
                     activeIp = ""
                     activeDnsCsv = ""
                     activeMtu = 0
+                    activeSessionName = ""
                     vpn.closeTun()
                     throw e
                 }
@@ -128,6 +154,7 @@ object RawTunEngine {
             activeIp = ""
             activeDnsCsv = ""
             activeMtu = 0
+            activeSessionName = ""
             RawTunVpnService.instance?.closeTun()
             diag("RAW TUN закрыт перед переподключением")
         }
@@ -147,6 +174,7 @@ object RawTunEngine {
         activeIp = ""
         activeDnsCsv = ""
         activeMtu = 0
+        activeSessionName = ""
         RawTunVpnService.instance?.closeTun()
         TunnelManager.addNetworkLog("[RAW] VPN отозван системой")
     }
@@ -157,6 +185,7 @@ object RawTunEngine {
         activeIp = ""
         activeDnsCsv = ""
         activeMtu = 0
+        activeSessionName = ""
         RawTunVpnService.instance?.closeTun()
         runCatching {
             context.applicationContext.stopService(
